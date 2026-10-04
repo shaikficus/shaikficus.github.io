@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shaik Mohammad Musthafa - Brand Film</title>
+<style>
+  html, body { margin: 0; background: #02050c; overflow: hidden; height: 100%; }
+  canvas { display: block; position: absolute; inset: 0; margin: auto; width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; }
+  #play { position: absolute; left: 50%; bottom: 9vh; transform: translateX(-50%); padding: 14px 34px; border: 1px solid rgba(244,246,250,.6);
+          background: rgba(4,9,20,.55); color: #f4f6fa; font: 400 16px "Segoe UI", system-ui, sans-serif; letter-spacing: .25em; cursor: pointer; }
+  #play:hover { border-color: #ff6a4d; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<button id="play">PLAY FILM WITH SOUND</button>
+<script>
+const W = 1920, H = 1080, TAU = Math.PI * 2;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const COL = { red: '#c74634', redHi: '#ff6a4d', blue: '#0078d4', blueHi: '#4cb0ff', silver: '#c4ccd8', white: '#f4f6fa', mute: '#7f8ca5' };
+const RGB = { b: '76,176,255', r: '255,106,77', s: '196,204,216', w: '244,246,250' };
+const DF = '"Segoe UI Variable Display","Segoe UI",sans-serif', UF = 'Consolas,monospace';
+const BEATS = window.BEATS || { offset: 0.011062, period: 0.500019 };
+const beatAt = t => (t - BEATS.offset) / BEATS.period;
+
+// ------------------------------------------------------------------ math
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const RT = (() => { const r = mulberry32(7); return Array.from({ length: 8192 }, () => r()); })();
+const rnd = i => RT[((Math.floor(i) % 8192) + 8192) % 8192];
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const map = (x, a, b) => clamp((x - a) / (b - a));
+const lerp = (a, b, x) => a + (b - a) * x;
+const fract = x => x - Math.floor(x);
+const smooth = x => x * x * (3 - 2 * x);
+const oExpo = x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x);
+const iExpo = x => x <= 0 ? 0 : Math.pow(2, 10 * x - 10);
+const ioCubic = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const oCubic = x => 1 - Math.pow(1 - x, 3);
+const oBack = (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+const spring = (x, k = 6, w = 11) => x <= 0 ? 0 : x >= 1 ? 1 : 1 - Math.exp(-k * x) * Math.cos(w * x);
+function keyed(b, keys, ease = ioCubic) {
+  if (b <= keys[0][0]) return keys[0][1];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const [b0, v0] = keys[i], [b1, v1] = keys[i + 1];
+    if (b < b1) return lerp(v0, v1, ease(map(b, b0, b1)));
+  }
+  return keys[keys.length - 1][1];
+}
+function keyedV(b, keys, ease = ioCubic) {
+  if (b <= keys[0][0]) return keys[0][1];
+  for (let i = 0; i < keys.length - 1; i++) {
+    const [b0, v0] = keys[i], [b1, v1] = keys[i + 1];
+    if (b < b1) { const u = ease(map(b, b0, b1)); return v0.map((x, j) => lerp(x, v1[j], u)); }
+  }
+  return keys[keys.length - 1][1];
+}
+function fib(i, n, r) { const y = 1 - 2 * (i + 0.5) / n, rr = Math.sqrt(1 - y * y), th = i * 2.399963; return [Math.cos(th) * rr * r, y * r, Math.sin(th) * rr * r]; }
+const norm = v => { const l = Math.hypot(...v) || 1; return v.map(x => x / l); };
+const rotY = (p, a) => { const c = Math.cos(a), s = Math.sin(a); return [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c]; };
+const rotX = (p, a) => { const c = Math.cos(a), s = Math.sin(a); return [p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c]; };
+const lerp3 = (a, b, u) => [lerp(a[0], b[0], u), lerp(a[1], b[1], u), lerp(a[2], b[2], u)];
+
+// ------------------------------------------------------------------ 3D camera
+function lookAt(E, T, f = 1100, cx = W / 2, cy = H / 2) {
+  let fx = T[0] - E[0], fy = T[1] - E[1], fz = T[2] - E[2]; const fl = Math.hypot(fx, fy, fz); fx /= fl; fy /= fl; fz /= fl;
+  let rx = fz, rz = -fx; const rl = Math.hypot(rx, rz) || 1e-6; rx /= rl; rz /= rl;
+  const ux = fy * rz, uy = fz * rx - fx * rz, uz = -fy * rx;
+  return { E, fx, fy, fz, rx, rz, ux, uy, uz, f, cx, cy };
+}
+function proj(c, x, y, z) {
+  const dx = x - c.E[0], dy = y - c.E[1], dz = z - c.E[2];
+  const Z = dx * c.fx + dy * c.fy + dz * c.fz; if (Z < 25) return null;
+  const X = dx * c.rx + dz * c.rz, Y = dx * c.ux + dy * c.uy + dz * c.uz, k = c.f / Z;
+  return [c.cx + X * k, c.cy - Y * k, k, Z];
+}
+const P3 = (c, p) => proj(c, p[0], p[1], p[2]);
+
+// ------------------------------------------------------------------ drawing
+function sprite(rgb) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, `rgba(${rgb},1)`); gr.addColorStop(0.14, `rgba(${rgb},0.62)`);
+  gr.addColorStop(0.4, `rgba(${rgb},0.13)`); gr.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128); return c;
+}
+const SP = { b: sprite(RGB.b), r: sprite(RGB.r), s: sprite(RGB.s), w: sprite(RGB.w) };
+function glow(x, y, s, k, a = 1) { if (a <= 0.004 || s < 0.6) return; ctx.globalAlpha = Math.min(1, a); ctx.drawImage(SP[k], x - s / 2, y - s / 2, s, s); }
+function glowWH(x, y, w, h, k, a = 1) { if (a <= 0.004) return; ctx.globalAlpha = Math.min(1, a); ctx.drawImage(SP[k], x - w / 2, y - h / 2, w, h); }
+function add(fn) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; fn(); ctx.restore(); }
+function setFont(size, w = 400, fam = DF, track = 0) { ctx.font = `${w} ${size}px ${fam}`; ctx.letterSpacing = `${track}px`; }
+function text(s, x, y, size, color, { w = 400, fam = DF, track = 0, align = 'left', alpha = 1 } = {}) {
+  if (alpha <= 0) return;
+  setFont(size, w, fam, track); ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+  ctx.globalAlpha = Math.min(1, alpha); ctx.fillStyle = color; ctx.fillText(s, align === 'center' ? x + track / 2 : x, y); ctx.globalAlpha = 1;
+}
+function tw(s, size, w = 400, fam = DF, track = 0) { setFont(size, w, fam, track); return ctx.measureText(s).width; }
+function rise(s, x, y, size, color, p, opt = {}, q = 0) {
+  if (p <= 0 || q >= 1) return;
+  const h = size * 1.32;
+  ctx.save(); ctx.beginPath(); ctx.rect(-60, y - size * 1.04, W + 120, h); ctx.clip();
+  text(s, x, y + (1 - p) * h - q * h, size, color, opt); ctx.restore();
+}
+const typed = (s, b, b0, b1) => s.slice(0, Math.floor(s.length * map(b, b0, b1)));
+function strokePts(P, color, w, alpha = 1) {
+  if (P.length < 2 || alpha <= 0) return;
+  ctx.globalAlpha = Math.min(1, alpha); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath();
+  P.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.stroke(); ctx.globalAlpha = 1;
+}
+function partial(P, prog) {
+  if (prog >= 1) return P; if (prog <= 0 || P.length < 2) return [];
+  const Ls = []; let tot = 0;
+  for (let i = 1; i < P.length; i++) { const d = Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]); Ls.push(d); tot += d; }
+  let rem = tot * prog; const out = [P[0]];
+  for (let i = 1; i < P.length; i++) {
+    if (rem >= Ls[i - 1]) { out.push(P[i]); rem -= Ls[i - 1]; }
+    else { const u = rem / (Ls[i - 1] || 1); out.push([lerp(P[i - 1][0], P[i][0], u), lerp(P[i - 1][1], P[i][1], u)]); break; }
+  }
+  return out;
+}
+function pointOn3(pts, u) {
+  const Ls = []; let tot = 0;
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1], pts[i][2] - pts[i - 1][2]); Ls.push(d); tot += d; }
+  let rem = clamp(u) * tot;
+  for (let i = 1; i < pts.length; i++) { if (rem <= Ls[i - 1]) return lerp3(pts[i - 1], pts[i], rem / (Ls[i - 1] || 1)); rem -= Ls[i - 1]; }
+  return pts[pts.length - 1];
+}
+function metal(y0, y1) {
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(0.55, '#e4e9f1'); g.addColorStop(1, '#9aa7ba'); return g;
+}
+function hex(x, y, r) { ctx.beginPath(); for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; k ? ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r) : ctx.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); } ctx.closePath(); }
+
+const BG = (() => {
+  const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(960, 560, 0, 960, 560, 1250);
+  gr.addColorStop(0, '#0e1f42'); gr.addColorStop(0.55, '#071330'); gr.addColorStop(1, '#02060f');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H); return c;
+})();
+const VIG = (() => {
+  const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(960, 540, 420, 960, 540, 1180);
+  gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.62)');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H); return c;
+})();
+const GRAIN = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+  const id = g.createImageData(256, 256), r = mulberry32(5);
+  for (let i = 0; i < id.data.length; i += 4) { const v = r() * 255; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0); return c;
+})();
+function grain(t) {
+  const f = Math.round(t * 60), ox = Math.floor(rnd(f * 3) * 256), oy = Math.floor(rnd(f * 3 + 1) * 256);
+  ctx.save(); ctx.globalAlpha = 0.035; ctx.globalCompositeOperation = 'overlay';
+  for (let y = -oy; y < H; y += 256) for (let x = -ox; x < W; x += 256) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+}
+
+// =================================================================== S1 ECOSYSTEM  (b 0-24)
+const R1 = mulberry32(11);
+const DUST = Array.from({ length: 900 }, () => [(R1() - .5) * 7000, (R1() - .5) * 4200, R1() * 8000 - 1500, R1()]);
+const LC = [0, 0, 3400];
+const CLUS = [[-1450, 420, 2700, 'b', 'ERP CLOUD'], [1350, 560, 3300, 'r', 'OCI'], [-1050, -560, 3900, 's', 'HCM CLOUD'],
+  [1500, -430, 2600, 'b', 'AZURE'], [80, 900, 4500, 's', 'EPM'], [-380, -780, 2400, 'r', 'INTEGRATION'], [700, -60, 5100, 'b', 'AI AGENTS']];
+const NPC = 60, NLAT = CLUS.length * NPC;
+const LAT = Array.from({ length: NLAT }, (_, i) => fib(i, NLAT, 640));
+const CPTS = [], LPT = new Array(NLAT);
+(() => {
+  const used = new Uint8Array(NLAT);
+  CLUS.forEach((c, ci) => {
+    const d = norm([c[0] - LC[0], c[1] - LC[1], c[2] - LC[2]]), cand = [];
+    for (let j = 0; j < NLAT; j++) if (!used[j]) cand.push([j, LAT[j][0] * d[0] + LAT[j][1] * d[1] + LAT[j][2] * d[2]]);
+    cand.sort((a, b) => b[1] - a[1]);
+    for (let k = 0; k < NPC; k++) { const j = cand[k][0]; used[j] = 1; LPT[j] = CPTS.length; CPTS.push([ci, fib(k, NPC, 105 + R1() * 35), j]); }
+  });
+})();
+const LEDGE = []; for (let i = 0; i < NLAT; i++) { if (i + 21 < NLAT) LEDGE.push([i, i + 21]); if (i + 34 < NLAT) LEDGE.push([i, i + 34]); }
+const STREAMS = [[0, 5], [5, 2], [2, 6], [6, 1], [1, 3], [3, 0], [0, 4], [4, 1], [5, 6], [2, 3]];
+const lightAt = ci => 1 + ci;
+
+function s1(b) {
+  ctx.drawImage(BG, 0, 0);
+  const u = ioCubic(clamp(b / 24));
+  const cam = lookAt([lerp(-260, 180, u) + 110 * Math.sin(b * 0.11), lerp(160, -40, u), keyed(b, [[0, -700], [22, 1150], [24, 1500]])], LC, 1100);
+  const conv = ioCubic(map(b, 8, 15.5)), col = ioCubic(map(b, 22.2, 23.5));
+  const ang = Math.max(0, b - 8) * 0.05;
+
+  add(() => {
+    for (const [x, y, z, r] of DUST) {
+      const p = proj(cam, x, y, z); if (!p) continue;
+      glow(p[0], p[1], Math.max(2, (2 + r * 3) * p[2] * 5), r > 0.86 ? 'b' : 's', 0.32 * clamp(p[2] * 2.2) * (1 - col * 0.6));
+    }
+  });
+
+  // streams between platforms
+  add(() => {
+    STREAMS.forEach(([a, c], e) => {
+      const s0 = Math.max(lightAt(a), lightAt(c)), al = map(b, s0 + 0.2, s0 + 1.0) * (1 - conv);
+      if (al <= 0) return;
+      const A = CLUS[a], C = CLUS[c], pt = v => [lerp(A[0], C[0], v), lerp(A[1], C[1], v) + Math.sin(Math.PI * v) * 220, lerp(A[2], C[2], v)];
+      const line = []; for (let k = 0; k <= 20; k++) { const p = P3(cam, pt(k / 20)); if (p) line.push(p); }
+      strokePts(line, `rgba(${RGB.b},1)`, 1, 0.16 * al);
+      for (let k = 0; k < 12; k++) {
+        const p = P3(cam, pt(fract(b * 0.3 + k / 12 + e * 0.37))); if (!p) continue;
+        glow(p[0], p[1], 26 * p[2] * 2.2, k % 4 ? 'b' : 'w', 0.8 * al);
+      }
+    });
+  });
+
+  // platform points -> lattice
+  const pos = CPTS.map(([ci, o, j], i) => {
+    const c = CLUS[ci], br = 1 + 0.06 * Math.sin(b * 0.9 + ci);
+    const a = [c[0] + o[0] * br, c[1] + o[1] * br, c[2] + o[2] * br];
+    const L0 = rotY(LAT[j], ang), tg = [LC[0] + L0[0], LC[1] + L0[1], LC[2] + L0[2]];
+    const e = ioCubic(map(b, 8 + ci * 0.35 + (i % NPC) / NPC * 0.6, 13.5 + ci * 0.25));
+    let p = [lerp(a[0], tg[0], e), lerp(a[1], tg[1], e) + Math.sin(Math.PI * e) * 160 * (ci % 2 ? 1 : -1), lerp(a[2], tg[2], e)];
+    if (col > 0) p = lerp3(p, LC, col);
+    return p;
+  });
+  const PP = pos.map(p => P3(cam, p));
+  const latA = map(conv, 0.6, 1) * 0.24 * (1 - col);
+  if (latA > 0) {
+    ctx.save(); ctx.globalAlpha = latA; ctx.strokeStyle = `rgba(${RGB.s},1)`; ctx.lineWidth = 1; ctx.beginPath();
+    for (const [i, j] of LEDGE) { const a = PP[LPT[i]], c = PP[LPT[j]]; if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); } }
+    ctx.stroke(); ctx.restore();
+  }
+  add(() => {
+    const pulse = b >= 9 ? [9, 11, 13, 15, 16].reduce((m, pb) => Math.max(m, b >= pb ? Math.exp(-(b - pb) * 2.2) : 0), 0) : 0;
+    PP.forEach((p, i) => {
+      if (!p) return;
+      const ci = CPTS[i][0], L = lightAt(ci);
+      const lit = b < L ? 0.45 : 0.6 + 0.4 * Math.exp(-(b - L) * 1.2);
+      const wave = Math.exp(-Math.pow(LAT[CPTS[i][2]][1] / 640 - (fract((b - 9) / 2) * 2.4 - 1.2), 2) * 30) * (b > 9 ? 0.6 : 0);
+      glow(p[0], p[1], 22 * p[2] * 2.4, CLUS[ci][3] === 'r' && conv < 0.5 ? 'r' : (i % 9 === 0 ? 'b' : 'w'), Math.min(1, lit * (1 - conv * 0.3) + wave * conv + pulse * 0.4));
+    });
+    CLUS.forEach((c, ci) => {
+      const p = P3(cam, c); if (!p) return;
+      const L = lightAt(ci), lit = b < L ? 0.3 : 0.5 + 0.5 * Math.exp(-(b - L) * 1.4);
+      glow(p[0], p[1], 760 * p[2], c[3], lit * (1 - conv) * 0.85);
+    });
+    const cp = P3(cam, LC);
+    if (cp && col > 0) {
+      const st = oExpo(map(b, 23.3, 24));
+      glow(cp[0], cp[1], 80 + 600 * col, 'b', col * (1 - st));
+      glowWH(cp[0], cp[1], lerp(240, 4600, st), lerp(240, 22, st), 'w', col);
+      glowWH(cp[0], cp[1], lerp(300, 5200, st), lerp(300, 70, st), 'b', col * 0.8);
+    }
+  });
+  // platform labels
+  CLUS.forEach((c, ci) => {
+    const p = P3(cam, c); if (!p) return;
+    const L = lightAt(ci), pIn = oExpo(map(b, L + 0.05, L + 0.6)), q = iExpo(map(b, 8 + ci * 0.35, 8.5 + ci * 0.35));
+    if (pIn <= 0 || q >= 1) return;
+    const lx = p[0], ly = p[1] - 175 * p[2] - 18;
+    ctx.globalAlpha = 0.6 * pIn * (1 - q); ctx.fillStyle = COL.silver; ctx.fillRect(lx - 0.5, ly + 12, 1, 26 * pIn); ctx.globalAlpha = 1;
+    rise(c[4], lx, ly, 20, c[3] === 'r' ? COL.redHi : COL.silver, pIn, { fam: UF, track: 5, align: 'center' }, q);
+  });
+
+  // title
+  if (b >= 16) {
+    const ny = 520, tr = lerp(40, 5, oExpo(map(b, 16, 18.6))), out = iExpo(map(b, 22.3, 23.3)), wr = oExpo(map(b, 16, 17.3));
+    ctx.save(); ctx.beginPath(); ctx.rect(960 - 1000 * wr, ny - 125, 2000 * wr, 160); ctx.clip();
+    setFont(92, 600, DF, tr); ctx.textAlign = 'center'; ctx.fillStyle = metal(ny - 78 - out * 160, ny + 6 - out * 160);
+    ctx.fillText('SHAIK MOHAMMAD MUSTHAFA', 960 + tr / 2, ny - out * 160);
+    ctx.restore();
+    const rw = 520 * oExpo(map(b, 17, 18.2)) * (1 - out);
+    ctx.fillStyle = COL.red; ctx.fillRect(960 - rw / 2, 566, rw, 3);
+    const parts = ['Technical Fellow', 'Enterprise Architect', 'AI Innovator'], GAP = 80;
+    const ws = parts.map(s => tw(s, 40, 300, DF, 2)), tot = ws.reduce((a, c) => a + c, 0) + GAP * 2;
+    let x = 960 - tot / 2;
+    parts.forEach((s, i) => {
+      rise(s, x, 650, 40, COL.white, oExpo(map(b, 18 + i * 0.5, 18.7 + i * 0.5)), { w: 300, track: 2 }, out);
+      if (i < 2) {
+        const h = 34 * oExpo(map(b, 18.4 + i * 0.5, 18.9 + i * 0.5)) * (1 - out);
+        ctx.fillStyle = COL.blueHi; ctx.fillRect(x + ws[i] + GAP / 2 - 1, 640 - h, 2, h);
+      }
+      x += ws[i] + GAP;
+    });
+  }
+}
+
+// =================================================================== S2 CAREER  (b 24-48)
+const MS = [
+  { b: 24, x: 0, y: -300, yr: '2012', co: 'WIPRO TECHNOLOGIES', role: 'Project Engineer  /  ERP Technical Consultant', note: 'EBS 11i \u2192 R12 upgrade  \u00b7  WebADI & PL/SQL ingestion  \u00b7  AME audit controls' },
+  { b: 30, x: 1500, y: -110, yr: '2015', co: 'DELOITTE CONSULTING', role: 'Technical Track Lead  /  Enterprise Solutions Consultant', note: 'Cloud Conversion Accelerator  \u00b7  100% conversion success' },
+  { b: 36, x: 2900, y: 90, yr: '2019', co: 'GAP INC.', role: 'Senior Integration Systems Architect', note: 'EBS Site Hub & Stibo migration  \u00b7  zero operational downtime' },
+  { b: 40, x: 4100, y: 300, yr: '2020', co: 'PROVIDENCE GLOBAL CENTER', role: 'Lead  \u2192  Principal  \u2192  Senior Principal Solutions Architect', note: 'EBAT target architecture  \u00b7  Agentic AI  \u00b7  enterprise cloud migration' },
+];
+const TARGET = { x: 5300, y: 640 };
+const HEADK = [[23.9, -1600], [24.5, 0], [28.3, 0], [30, 1500], [34.3, 1500], [36, 2900], [38.5, 2900], [40, 4100], [42.9, 4100], [44.5, 5300]];
+const COPY_END = [28.2, 34.2, 38.4, 42.8];
+const STEPS = [[4290, 41], [4480, 41.75], [4670, 42.5]];
+function pathY(x) {
+  if (x <= 0) return MS[0].y;
+  const pts = [...MS.map(m => [m.x, m.y]), [TARGET.x, TARGET.y]];
+  for (let i = 0; i < pts.length - 1; i++) { const [x0, y0] = pts[i], [x1, y1] = pts[i + 1]; if (x <= x1) return lerp(y0, y1, smooth(clamp((x - x0) / (x1 - x0)))); }
+  return TARGET.y;
+}
+const R2 = mulberry32(22);
+const FRONT = Array.from({ length: 150 }, () => [R2() * 11000 - 2500, R2() * 2600 - 1100, -1450 + R2() * 700, R2()]);
+const FAR = Array.from({ length: 320 }, () => [R2() * 14000 - 3500, R2() * 4200 - 1800, 1300 + R2() * 3000, R2()]);
+function camS2(b) {
+  const hx = keyed(b, HEADK), cx = hx + 330, cy = pathY(keyed(b - 0.25, HEADK)) + 40;
+  const whip = 9000 * iExpo(map(b, 46.6, 48));
+  return lookAt([cx - 260 + whip, cy + 150, -1800 + 120 * Math.sin(b * 0.2)], [cx + 140 + whip, cy, 0], 1100);
+}
+function odometer(prev, cur, x, y, size, p, color) {
+  setFont(size, 300, DF, 0); const dw = ctx.measureText('0').width;
+  for (let i = 0; i < 4; i++) {
+    const a = prev[i], c = cur[i], dx = x + i * dw;
+    if (a === c || p >= 1) { text(c, dx, y, size, color, { w: 300 }); continue; }
+    ctx.save(); ctx.beginPath(); ctx.rect(dx - 6, y - size * 0.95, dw + 12, size * 1.2); ctx.clip();
+    text(a, dx, y - p * size * 1.15, size, color, { w: 300 }); text(c, dx, y + (1 - p) * size * 1.15, size, color, { w: 300 });
+    ctx.restore();
+  }
+}
+function s2(b) {
+  ctx.drawImage(BG, 0, 0);
+  const cam = camS2(b), whip = map(b, 46.6, 48), prevCam = whip > 0 ? camS2(b - 0.05) : null;
+  // back blueprint plane
+  ctx.save(); ctx.globalAlpha = 0.07; ctx.strokeStyle = COL.blueHi; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = -3200; x <= 9600; x += 400) { const a = proj(cam, x, -1600, 1500), c = proj(cam, x, 2000, 1500); if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); } }
+  for (let y = -1600; y <= 2000; y += 400) { const a = proj(cam, -3200, y, 1500), c = proj(cam, 9600, y, 1500); if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); } }
+  ctx.stroke(); ctx.restore();
+  add(() => {
+    for (const [x, y, z, r] of FAR) {
+      const p = proj(cam, x, y, z); if (!p) continue;
+      if (prevCam) { const q = proj(prevCam, x, y, z); if (q) { strokePts([q, p], `rgba(${RGB.s},1)`, 1.2, 0.25); continue; } }
+      glow(p[0], p[1], 10 + r * 10, r > 0.8 ? 'b' : 's', 0.3);
+    }
+  });
+  // future (dashed) trajectory + travelled path
+  const hx = keyed(b, HEADK);
+  const fut = []; for (let x = 0; x <= TARGET.x; x += 40) { const p = proj(cam, x, pathY(x), 0); if (p) fut.push(p); }
+  ctx.setLineDash([6, 10]); strokePts(fut, COL.silver, 1.2, 0.18); ctx.setLineDash([]);
+  const pts = []; for (let x = -1800; x <= hx; x += 25) { const p = proj(cam, x, pathY(x), 0); if (p) pts.push(p); }
+  const hp = proj(cam, hx, pathY(hx), 0); if (hp) pts.push(hp);
+  add(() => { strokePts(pts, COL.blueHi, 9, 0.16); strokePts(pts, COL.blueHi, 3, 0.9); strokePts(pts, '#ffffff', 1.2, 0.8); });
+  // promotion steps at Providence
+  add(() => STEPS.forEach(([x, sb], i) => {
+    if (b < sb) return; const p = proj(cam, x, pathY(x), 0); if (!p) return;
+    glow(p[0], p[1], 46, i === 2 ? 'r' : 'b', 0.9); glow(p[0], p[1], 14, 'w', 1);
+  }));
+  // milestone nodes
+  MS.forEach((m, i) => {
+    if (b < m.b - 0.05) return;
+    const p = proj(cam, m.x, m.y, 0); if (!p) return;
+    const u = map(b, m.b, m.b + 1.2), last = i === 3;
+    add(() => { glow(p[0], p[1], 120, last ? 'r' : 'b', 0.85); glow(p[0], p[1], 26, 'w', 1); });
+    ctx.strokeStyle = last ? COL.redHi : COL.blueHi; ctx.lineWidth = 2; ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.arc(p[0], p[1], 15, 0, TAU); ctx.stroke();
+    if (u < 1) { ctx.globalAlpha = 1 - u; ctx.lineWidth = 2.5 * (1 - u); ctx.beginPath(); ctx.arc(p[0], p[1], 18 + 150 * oExpo(u), 0, TAU); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  });
+  if (hp) add(() => { glow(hp[0], hp[1], 160, 'b', 0.7); glow(hp[0], hp[1], 34, 'w', 1); });
+  // target role node
+  if (b >= 43) {
+    const p = proj(cam, TARGET.x, TARGET.y, 0);
+    if (p) {
+      const pin = oExpo(map(b, 43, 43.8)), q = iExpo(map(b, 46.4, 46.9));
+      ctx.save(); ctx.translate(p[0], p[1]); ctx.rotate(b * 0.4); ctx.setLineDash([5, 7]);
+      ctx.strokeStyle = COL.white; ctx.lineWidth = 2; ctx.globalAlpha = pin;
+      ctx.beginPath(); ctx.arc(0, 0, 36 * pin, 0, TAU); ctx.stroke(); ctx.restore();
+      add(() => glow(p[0], p[1], 200 * pin, 'w', 0.5 * pin));
+      rise('TARGET ROLE', p[0] + 62, p[1] - 22, 20, COL.blueHi, oExpo(map(b, 43.4, 44)), { fam: UF, track: 6 }, q);
+      rise('TECHNICAL FELLOW', p[0] + 62, p[1] + 28, 46, COL.white, oExpo(map(b, 43.6, 44.3)), { w: 600, track: 4 }, q);
+    }
+  }
+  // milestone copy
+  MS.forEach((m, i) => {
+    const end = COPY_END[i];
+    if (b < m.b || b >= end) return;
+    const p = proj(cam, m.x, m.y, 0); if (!p) return;
+    const pIn = k => oExpo(map(b, m.b + k, m.b + k + 0.55)), q = iExpo(map(b, end - 0.45, end));
+    const x = p[0] + 46, y = p[1];
+    ctx.save(); ctx.beginPath(); ctx.rect(-60, -60, W + 120, H + 120); ctx.clip();
+    if (q < 1) odometer(i ? MS[i - 1].yr : '2000', m.yr, x, y - 46 - q * 160, 150, pIn(0), COL.white);
+    ctx.restore();
+    rise(m.co, x, y + 92, 54, COL.white, pIn(0.12), { w: 600, track: 3 }, q);
+    if (i < 3) rise(m.role, x, y + 140, 32, COL.blueHi, pIn(0.25), { w: 300 }, q);
+    else {
+      const segs = ['Lead', '  \u2192  ', 'Principal', '  \u2192  ', 'Senior Principal Solutions Architect'];
+      let sx = x;
+      segs.forEach((s, k) => {
+        const act = k % 2 === 0 ? (b >= [41, 0, 41.75, 0, 42.5][k] ? 1 : 0.45) : 0.45;
+        rise(s, sx, y + 140, 32, act > 0.9 ? COL.white : COL.blueHi, pIn(0.25), { w: 300, alpha: k % 2 ? 0.6 : 1 }, q);
+        const sw = tw(s, 32, 300);
+        if (k % 2 === 0 && b >= [41, 0, 41.75, 0, 42.5][k] && q < 1) { ctx.fillStyle = COL.red; ctx.fillRect(sx, y + 152, sw * oExpo(map(b, [41, 0, 41.75, 0, 42.5][k], [41, 0, 41.75, 0, 42.5][k] + 0.4)), 3); }
+        sx += sw;
+      });
+    }
+    if (q < 1) text(typed(m.note, b, m.b + 0.5, m.b + 1.6), x, y + 186 - q * 40, 22, COL.silver, { fam: UF, track: 1, alpha: 0.85 * (1 - q) });
+  });
+  // 13+ years statement
+  if (b >= 44.3) {
+    const q = iExpo(map(b, 46.3, 46.8));
+    rise('13+', 120, 800, 170, COL.white, oExpo(map(b, 44.3, 44.9)), { w: 300 }, q);
+    rise('YEARS OF ENTERPRISE TRANSFORMATION', 128, 852, 28, COL.silver, oExpo(map(b, 44.5, 45.1)), { w: 600, track: 6 }, q);
+    rise('Cloud modernization  \u00b7  large-scale technology leadership', 128, 896, 26, COL.blueHi, oExpo(map(b, 44.7, 45.3)), { w: 300 }, q);
+  }
+  add(() => {
+    for (const [x, y, z, r] of FRONT) {
+      const p = proj(cam, x, y, z); if (!p) continue;
+      if (prevCam) { const q = proj(prevCam, x, y, z); if (q) { strokePts([q, p], `rgba(${RGB.b},1)`, 2, 0.35); continue; } }
+      glow(p[0], p[1], 40 * p[2] * (0.6 + r), r > 0.75 ? 'b' : 's', 0.09);
+    }
+  });
+}
+
+// =================================================================== S3 ARCHITECTURE  (b 48-68)
+const AN = [
+  { id: 'OIC', u: 0, v: 0, L: 0, w: 560, h: 130, t: 'ORACLE INTEGRATION CLOUD', s: 'GEN 3  \u00b7  EVENT-DRIVEN HUB', c: 'r', at: 48.0 },
+  { id: 'ERP', u: -620, v: 330, L: 1, w: 400, h: 120, t: 'ORACLE ERP CLOUD', s: 'FINANCIALS \u00b7 SCM \u00b7 PPM', c: 's', at: 48.5 },
+  { id: 'HCM', u: 0, v: 330, L: 1, w: 400, h: 120, t: 'ORACLE HCM CLOUD', s: 'GLOBAL HR', c: 's', at: 49 },
+  { id: 'EPM', u: 620, v: 330, L: 1, w: 400, h: 120, t: 'HYPERION / EPM', s: 'PLANNING \u00b7 CONSOLIDATION', c: 's', at: 49.5 },
+  { id: 'MFT', u: -790, v: 0, L: 0, w: 300, h: 120, t: 'BMC MFTe', s: 'MANAGED FILE TRANSFER', c: 'b', at: 50 },
+  { id: 'BMI', u: 790, v: 0, L: 0, w: 300, h: 120, t: 'DELL BOOMI', s: 'HYBRID iPaaS', c: 'b', at: 50.5 },
+  { id: 'OCI', u: -690, v: -330, L: -1, w: 310, h: 115, t: 'OCI', s: 'ATP \u00b7 VBCS \u00b7 APEX \u00b7 ORDS', c: 'b', at: 51 },
+  { id: 'AZ', u: -230, v: -330, L: -1, w: 310, h: 115, t: 'AZURE', s: 'ENTERPRISE CLOUD', c: 'b', at: 51.5 },
+  { id: 'SN', u: 230, v: -330, L: -1, w: 310, h: 115, t: 'SERVICENOW', s: 'ITSM \u00b7 INCIDENT AUTOMATION', c: 'b', at: 52 },
+  { id: 'CM', u: 690, v: -330, L: -1, w: 310, h: 115, t: 'CONTROL-M', s: 'HELIX SaaS ORCHESTRATION', c: 'b', at: 52.5 },
+];
+const CONN = [
+  ['ERP', [[-620, 270], [-620, 170], [-180, 170], [-180, 65]]], ['HCM', [[0, 270], [0, 65]]], ['EPM', [[620, 270], [620, 170], [180, 170], [180, 65]]],
+  ['MFT', [[-640, 0], [-280, 0]]], ['BMI', [[640, 0], [280, 0]]],
+  ['OCI', [[-690, -272], [-690, -170], [-200, -170], [-200, -65]]], ['AZ', [[-230, -272], [-230, -210], [-80, -210], [-80, -65]]],
+  ['SN', [[230, -272], [230, -210], [80, -210], [80, -65]]], ['CM', [[690, -272], [690, -170], [200, -170], [200, -65]]],
+];
+const ANI = Object.fromEntries(AN.map(n => [n.id, n]));
+const HEADS = [
+  [60, 'Target Operating Model', 'EBAT blueprint  \u00b7  ERP \u00b7 HCM \u00b7 EPM \u00b7 OCI \u00b7 Azure'],
+  [62, 'Architecture Review Boards', 'Global governance  \u00b7  ADRs  \u00b7  vendor selection'],
+  [64, 'Zero-Trust Integration', 'TLS  \u00b7  SSO  \u00b7  auditability  \u00b7  observability'],
+  [66, 'Enterprise-Scale Decisions', 'Strategic roadmaps  \u00b7  FinOps  \u00b7  cutover governance'],
+];
+function planeText(cam, s, P, size, color, { w = 600, fam = DF, track = 2, align = 'center', alpha = 1 } = {}) {
+  const o = P3(cam, P), pu = proj(cam, P[0] + 10, P[1], P[2]), pv = proj(cam, P[0], P[1], P[2] - 10);
+  if (!o || !pu || !pv) return;
+  ctx.save(); ctx.setTransform((pu[0] - o[0]) / 10, (pu[1] - o[1]) / 10, (pv[0] - o[0]) / 10, (pv[1] - o[1]) / 10, o[0], o[1]);
+  text(s, 0, 0, size, color, { w, fam, track, align, alpha }); ctx.restore();
+}
+function camS3(b) {
+  const tilt = ioCubic(map(b, 56, 60)), dive = ioCubic(map(b, 66.4, 67.9));
+  const p = lerp(1.535, 0.6, tilt);
+  const d = lerp(lerp(1250, 1650, tilt), 230, dive);
+  const a = lerp(0, 0.32, tilt) + Math.max(0, b - 60) * 0.025;
+  const cx = lerp(lerp(960, 1150, ioCubic(map(b, 58, 61))), 960, dive);
+  return lookAt([d * Math.cos(p) * Math.sin(a), d * Math.sin(p), -d * Math.cos(p) * Math.cos(a)], [0, 0, 0], 1100, cx, lerp(540, 640, tilt * (1 - dive)));
+}
+function s3(b) {
+  ctx.drawImage(BG, 0, 0);
+  const cam = camS3(b), sep = 260 * ioCubic(map(b, 56, 60)), plate = ioCubic(map(b, 56.5, 59));
+  const LY = L => L * sep;
+  // ground blueprint grid
+  ctx.save(); ctx.globalAlpha = 0.09; ctx.strokeStyle = COL.blueHi; ctx.lineWidth = 1; ctx.beginPath();
+  const gy = -sep - 60;
+  for (let x = -1400; x <= 1400; x += 100) { const a = proj(cam, x, gy, -900), c = proj(cam, x, gy, 900); if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); } }
+  for (let z = -900; z <= 900; z += 100) { const a = proj(cam, -1400, gy, z), c = proj(cam, 1400, gy, z); if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); } }
+  ctx.stroke(); ctx.restore();
+  // layer plates
+  const PL = [[-1, -450, -210, 'PLATFORM  \u00b7  MULTI-CLOUD'], [0, -120, 120, 'INTEGRATION  \u00b7  EVENT-DRIVEN'], [1, 210, 450, 'EXPERIENCE  \u00b7  ORACLE SaaS']];
+  if (plate > 0) PL.forEach(([L, z0, z1, lab]) => {
+    const y = LY(L), Q = [[-1080, y, z0], [1080, y, z0], [1080, y, z1], [-1080, y, z1]].map(q => P3(cam, q));
+    if (Q.some(q => !q)) return;
+    ctx.beginPath(); Q.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.closePath();
+    ctx.globalAlpha = 0.07 * plate; ctx.fillStyle = COL.blueHi; ctx.fill();
+    ctx.globalAlpha = 0.35 * plate; ctx.strokeStyle = COL.blueHi; ctx.lineWidth = 1; ctx.stroke(); ctx.globalAlpha = 1;
+    if (b >= 60) planeText(cam, typed(lab, b, 60.1, 60.8), [-1050, y, z0 + 26], 22, COL.blueHi, { fam: UF, w: 400, track: 4, align: 'left', alpha: 0.9 });
+  });
+  // zero-trust rings
+  if (b >= 64) {
+    const pr = oExpo(map(b, 64, 65.2));
+    [[1190, 610, 0.8], [1290, 690, 0.45]].forEach(([rx, rz, al], ri) => {
+      const P = []; for (let k = 0; k <= 160 * pr; k++) { const a = k / 160 * TAU + ri; const p = proj(cam, Math.cos(a) * rx, 0, Math.sin(a) * rz); if (p) P.push(p); }
+      ctx.setLineDash([16, 10]); ctx.lineDashOffset = -b * 40 * (ri ? -1 : 1); strokePts(P, COL.blueHi, 2, al); ctx.setLineDash([]);
+    });
+    for (let k = 0; k < 6; k++) {
+      const a = k / 6 * TAU + 0.5, p = proj(cam, Math.cos(a) * 1190, 0, Math.sin(a) * 610), s = oBack(map(b, 64.3 + k * 0.12, 64.7 + k * 0.12));
+      if (!p || s <= 0) continue;
+      ctx.save(); ctx.translate(p[0], p[1]); ctx.scale(s, s);
+      ctx.fillStyle = '#071330'; ctx.fillRect(-11, -4, 22, 18); ctx.strokeStyle = COL.white; ctx.lineWidth = 2; ctx.strokeRect(-11, -4, 22, 18);
+      ctx.beginPath(); ctx.arc(0, -4, 7, Math.PI, 0); ctx.stroke(); ctx.restore();
+    }
+  }
+  const box = n => {
+    const prog = ioCubic(map(b, n.at, n.at + 0.9)); if (prog <= 0) return;
+    const y = LY(n.L), hw = n.w / 2, hh = n.h / 2;
+    const Q = [[n.u - hw, y, n.v + hh], [n.u + hw, y, n.v + hh], [n.u + hw, y, n.v - hh], [n.u - hw, y, n.v - hh]].map(q => P3(cam, q));
+    if (Q.some(q => !q)) return;
+    ctx.beginPath(); Q.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.closePath();
+    ctx.globalAlpha = 0.92 * prog * prog; ctx.fillStyle = n.c === 'r' ? '#1a1220' : '#0a1834'; ctx.fill(); ctx.globalAlpha = 1;
+    const colr = n.c === 'r' ? COL.redHi : n.c === 'b' ? COL.blueHi : COL.silver;
+    strokePts(partial([...Q, Q[0]], prog), colr, n.c === 'r' ? 2.5 : 1.6, 0.95);
+    planeText(cam, typed(n.t, b, n.at + 0.25, n.at + 0.85), [n.u, y, n.v + 8], n.id === 'OIC' ? 34 : 28, COL.white, { w: 600, track: 3 });
+    planeText(cam, typed(n.s, b, n.at + 0.45, n.at + 1.1), [n.u, y, n.v - 30], 16, colr, { fam: UF, w: 400, track: 2, alpha: 0.9 });
+  };
+  AN.filter(n => n.L === -1).forEach(box);
+  // connectors + packets + ARB gates
+  const flash = b >= 66 ? Math.exp(-fract(b) * 4) : 0;
+  CONN.forEach(([id, pts], ci) => {
+    const n = ANI[id], srcY = LY(n.L);
+    const P = pts.map((q, i) => [q[0], i === pts.length - 1 && n.L !== 0 ? 0 : srcY, q[1]]);
+    const prog = ioCubic(map(b, n.at + 0.6, n.at + 1.4)); if (prog <= 0) return;
+    const SP2 = []; for (let k = 0; k < P.length - 1; k++) for (let s = 0; s < 8; s++) { const p = P3(cam, lerp3(P[k], P[k + 1], s / 8)); if (p) SP2.push(p); }
+    const pe = P3(cam, P[P.length - 1]); if (pe) SP2.push(pe);
+    strokePts(partial(SP2, prog), n.c === 'b' ? COL.blueHi : COL.silver, 1.6, 0.6 + flash * 0.4);
+    if (b > 53.5) add(() => {
+      for (let j = 0; j < 2; j++) {
+        let u = fract((b - 53.5) * 0.5 + ci * 0.17 + j * 0.5); if (ci % 2) u = 1 - u;
+        const p = P3(cam, pointOn3(P, u)); if (!p) continue;
+        glow(p[0], p[1], 40, 'b', 0.9); glow(p[0], p[1], 12, 'w', 1);
+      }
+    });
+    if (b >= 62) {
+      const g = P3(cam, pointOn3(P, 0.72)); if (!g) return;
+      const s = oBack(map(b, 62 + ci * 0.06, 62.4 + ci * 0.06));
+      let hit = 0; for (let j = 0; j < 2; j++) { let u = fract((b - 53.5) * 0.5 + ci * 0.17 + j * 0.5); if (ci % 2) u = 1 - u; hit = Math.max(hit, Math.exp(-Math.pow((u - 0.72) / 0.05, 2))); }
+      ctx.save(); ctx.translate(g[0], g[1]); ctx.rotate(Math.PI / 4); ctx.scale(s, s);
+      ctx.fillStyle = hit > 0.3 ? COL.blueHi : '#071330'; ctx.strokeStyle = hit > 0.3 ? COL.white : COL.redHi; ctx.lineWidth = 2;
+      ctx.fillRect(-7, -7, 14, 14); ctx.strokeRect(-7, -7, 14, 14); ctx.restore();
+      if (hit > 0.3) add(() => glow(g[0], g[1], 60, 'b', hit));
+    }
+  });
+  AN.filter(n => n.L === 0).forEach(box);
+  AN.filter(n => n.L === 1).forEach(box);
+  // hub energy + dive iris
+  const hub = proj(cam, 0, 0, 0);
+  if (hub) add(() => {
+    glow(hub[0], hub[1], 260 + 60 * Math.sin(b * Math.PI), 'r', 0.35);
+    const ir = iExpo(map(b, 66.9, 68));
+    if (ir > 0) { glow(hub[0], hub[1], 200 + 3800 * ir, 'w', ir); glow(hub[0], hub[1], 400 + 4200 * ir, 'b', ir); }
+  });
+  HEADS.forEach(([hb, big, small], i) => {
+    const end = i < 3 ? HEADS[i + 1][0] : 66.7;
+    if (b < hb || b >= end) return;
+    const q = iExpo(map(b, end - 0.3, end));
+    rise(big, 110, 230, 88, COL.white, oExpo(map(b, hb, hb + 0.5)), { w: 300 }, q);
+    rise(small, 116, 290, 26, COL.blueHi, oExpo(map(b, hb + 0.12, hb + 0.6)), { fam: UF, track: 2 }, q);
+    ctx.fillStyle = COL.red; ctx.fillRect(116, 318, 80 * oExpo(map(b, hb + 0.1, hb + 0.6)) * (1 - q), 3);
+  });
+}
+
+// =================================================================== S4 AGENTIC AI  (b 68-86)
+const AG = [{ p: [0, 0, 0], tier: 0, name: 'ORCHESTRATOR', col: 'r' }];
+const INNER = ['JOURNAL AGENT', 'VALIDATION AGENT', 'DECISION AGENT', 'RECONCILIATION AGENT', 'INTEGRATION AGENT', '', ''];
+for (let i = 0; i < 7; i++) AG.push({ p: fib(i, 7, 270), tier: 1, name: INNER[i], col: 'b' });
+const R4 = mulberry32(44);
+for (let i = 0; i < 20; i++) { const q = fib(i, 20, 560 + R4() * 90); AG.push({ p: q, tier: 2, name: '', col: i % 5 === 0 ? 's' : 'b' }); }
+const AEDGE = [];
+(() => {
+  const has = new Set(), addE = (i, j) => { const k = i < j ? `${i}-${j}` : `${j}-${i}`; if (!has.has(k)) { has.add(k); AEDGE.push([i, j]); } };
+  const d = (i, j) => Math.hypot(...AG[i].p.map((x, k) => x - AG[j].p[k]));
+  for (let i = 1; i <= 7; i++) addE(0, i);
+  for (let i = 8; i < AG.length; i++) {
+    [...Array(7).keys()].map(k => k + 1).sort((a, c) => d(i, a) - d(i, c)).slice(0, 2).forEach(j => addE(i, j));
+    [...Array(20).keys()].map(k => k + 8).filter(j => j !== i).sort((a, c) => d(i, a) - d(i, c)).slice(0, 1).forEach(j => addE(i, j));
+  }
+})();
+const spawnB = i => 68 + i * (4 / 28);
+const NDUST = Array.from({ length: 1000 }, () => { const d = norm([R4() - .5, R4() - .5, R4() - .5]), r = 650 + R4() * 500; return [d, r, R4()]; });
+const ROWS = [['JE-24-1042', 'GL 4100-220', '12,480.00'], ['JE-24-1043', 'GL 5200-110', '8,930.25'], ['JE-24-1044', 'GL 1450-300', '41,002.10'],
+  ['JE-24-1045', 'GL 2210-140', '3,317.80'], ['JE-24-1046', 'GL 6100-020', '27,560.00'], ['JE-24-1047', 'GL 4100-225', '910.40']];
+const WORDS = [['REAL-TIME', 300], ['AUTONOMOUS', 700], ['INTELLIGENT', 300], ['ENTERPRISE', 700]];
+function agentXf(b) {
+  const yaw = (b - 68) * 0.06 + 0.3, tilt = 0.22 * Math.sin((b - 68) * 0.09);
+  const s = 1 - ioCubic(map(b, 84.2, 85.7));
+  return p => { const q = rotX(rotY(p, yaw), tilt); return [q[0] * s, q[1] * s, q[2] * s]; };
+}
+function camS4(b) {
+  const d = keyed(b, [[68, 1750], [80, 1350], [84, 1300], [86, 2300]]) - (b >= 80 ? 180 * Math.exp(-(b - 80) * 3) : 0);
+  return lookAt([0, 160, -d], [0, 0, 0], 1100, 1240, 540);
+}
+function holo(b, valP) {
+  const open = ioCubic(map(b, 72, 72.6)), close = ioCubic(map(b, 79.4, 80)), h = 560 * open * (1 - close);
+  if (h < 2) return;
+  const X = 110, Y = 330, Wp = 640;
+  ctx.save(); ctx.translate(X, Y); ctx.transform(1, -0.02, 0, 1, 0, 0);
+  ctx.beginPath(); ctx.rect(-4, 280 - h / 2, Wp + 8, h); ctx.clip();
+  ctx.fillStyle = 'rgba(8,36,78,0.42)'; ctx.fillRect(0, 0, Wp, 560);
+  ctx.strokeStyle = 'rgba(76,176,255,0.65)'; ctx.lineWidth = 1.5; ctx.strokeRect(0.5, 0.5, Wp - 1, 559);
+  text('AUTONOMOUS JOURNAL VALIDATION', 28, 50, 20, COL.blueHi, { fam: UF, track: 4 });
+  const live = Math.floor(b * 2) % 2 === 0;
+  ctx.fillStyle = COL.redHi; ctx.globalAlpha = live ? 1 : 0.35; ctx.beginPath(); ctx.arc(Wp - 84, 43, 5, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+  text('LIVE', Wp - 70, 50, 18, COL.silver, { fam: UF, track: 3 });
+  ctx.fillStyle = 'rgba(76,176,255,0.4)'; ctx.fillRect(28, 70, Wp - 56, 1);
+  ROWS.forEach((r, k) => {
+    const y = 122 + k * 60, pr = oExpo(map(b, 72.3 + k * 0.1, 72.8 + k * 0.1)); if (pr <= 0) return;
+    ctx.save(); ctx.beginPath(); ctx.rect(0, y - 30, Wp, 44); ctx.clip(); ctx.translate(0, (1 - pr) * 40);
+    text(r[0], 28, y, 21, COL.white, { fam: UF }); text(r[1], 190, y, 19, COL.silver, { fam: UF, alpha: 0.85 });
+    text(r[2], 440, y, 21, COL.white, { fam: UF, align: 'right' });
+    const ck = 73 + k * 0.75;
+    let lab = '\u00b7'.repeat(1 + Math.floor(b * 4) % 3), c = COL.mute, fill = null;
+    if (k === 3) { if (b >= 76.5) { lab = 'REMEDIATED'; c = COL.white; fill = 'rgba(0,120,212,0.45)'; } else if (b >= 75.25) { lab = 'EXCEPTION'; c = COL.white; fill = 'rgba(199,70,52,0.7)'; } }
+    else if (b >= ck) { lab = 'VALIDATED'; c = COL.white; fill = 'rgba(0,120,212,0.45)'; }
+    if (fill) { const s = oBack(map(b, k === 3 ? (b >= 76.5 ? 76.5 : 75.25) : ck, (k === 3 ? (b >= 76.5 ? 76.5 : 75.25) : ck) + 0.3)); ctx.save(); ctx.translate(Wp - 98, y - 7); ctx.scale(s, s); ctx.fillStyle = fill; ctx.fillRect(-72, -16, 144, 30); ctx.restore(); }
+    text(lab, Wp - 98, y, 17, c, { fam: UF, track: 2, align: 'center' });
+    ctx.restore();
+    ctx.fillStyle = 'rgba(76,176,255,0.12)'; ctx.fillRect(28, y + 24, Wp - 56, 1);
+  });
+  text('REAL-TIME DECISION', 28, 492, 18, COL.silver, { fam: UF, track: 3 });
+  const cf = 0.98 * ioCubic(map(b, 73, 78.3));
+  ctx.fillStyle = 'rgba(76,176,255,0.18)'; ctx.fillRect(28, 505, Wp - 56, 8);
+  ctx.fillStyle = COL.blueHi; ctx.fillRect(28, 505, (Wp - 56) * cf, 8);
+  text(`CONFIDENCE ${cf.toFixed(2)}`, Wp - 28, 492, 18, COL.white, { fam: UF, align: 'right' });
+  if (b >= 78.4) text(typed('POSTED \u2192 ORACLE ERP CLOUD', b, 78.4, 79.1), 28, 545, 19, COL.white, { fam: UF, track: 2 });
+  for (let y = 0; y < 560; y += 4) { ctx.fillStyle = 'rgba(76,176,255,0.03)'; ctx.fillRect(0, y, Wp, 1); }
+  ctx.fillStyle = 'rgba(160,215,255,0.22)'; ctx.fillRect(0, fract((b - 72) * 0.5) * 560, Wp, 2);
+  ctx.restore();
+  if (valP && b > 73 && b < 79.4) {
+    ctx.setLineDash([4, 8]); ctx.lineDashOffset = -b * 30;
+    strokePts([[X + Wp, Y + 230], valP], COL.blueHi, 1.5, 0.6 * map(b, 73, 73.5)); ctx.setLineDash([]);
+  }
+}
+function s4(b) {
+  ctx.drawImage(BG, 0, 0);
+  const cam = camS4(b), xf = agentXf(b), cont = ioCubic(map(b, 84.2, 85.7));
+  const iris = 1 - oExpo(map(b, 68, 68.8));
+  // neural dust
+  add(() => {
+    const push = b >= 80 ? 1 + 0.3 * Math.exp(-(b - 80) * 2) : 1;
+    NDUST.forEach(([d, r, k]) => {
+      const sw = (b - 68) * (0.05 + 0.06 * (1150 - r) / 500);
+      const p = P3(cam, xf(rotY(d.map(x => x * r * push), sw))); if (!p) return;
+      glow(p[0], p[1], 7 + k * 8, k > 0.9 ? 'r' : k > 0.6 ? 'b' : 's', 0.32);
+    });
+  });
+  const AP = AG.map(a => P3(cam, xf(a.p)));
+  const curve = (i, j, u) => { const a = xf(AG[i].p), c = xf(AG[j].p), m = lerp3(a, c, 0.5).map(x => x * 1.35); return [0, 1, 2].map(k => (1 - u) * (1 - u) * a[k] + 2 * u * (1 - u) * m[k] + u * u * c[k]); };
+  // edges + messages
+  AEDGE.forEach(([i, j], e) => {
+    const s0 = Math.max(spawnB(i), spawnB(j)), pr = map(b, s0, s0 + 0.5); if (pr <= 0) return;
+    const dist = Math.max(AG[i].tier, AG[j].tier), wave = b >= 79.8 ? Math.exp(-Math.pow((b - 80) - dist * 0.3, 2) * 18) : 0;
+    const P = []; for (let k = 0; k <= 16 * pr; k++) { const p = P3(cam, curve(i, j, k / 16)); if (p) P.push(p); }
+    strokePts(P, wave > 0.2 ? COL.white : COL.blueHi, 1.2 + wave * 2, (0.24 + wave * 0.7) * (1 - cont));
+    if (b < 72) return;
+    add(() => {
+      const per = b >= 80 ? 1 : 2, ph = fract(e * 0.618) * per, loc = b - 72 - ph; if (loc < 0) return;
+      const cyc = Math.floor(loc / per), u = (loc - cyc * per) / 1.1; if (u >= 1) return;
+      const dir = (cyc + e) % 2;
+      for (let k = 0; k < 7; k++) {
+        const uu = u - k * 0.035; if (uu < 0) break;
+        const p = P3(cam, curve(i, j, dir ? 1 - uu : uu)); if (!p) continue;
+        glow(p[0], p[1], (k ? 18 : 30) * p[2] * 2.2 * (1 - k / 8), k ? 'b' : 'w', (k ? 0.5 : 1) * (1 - cont));
+      }
+    });
+  });
+  // agents (depth sorted)
+  AG.map((a, i) => [i, AP[i]]).filter(x => x[1]).sort((a, c) => c[1][3] - a[1][3]).forEach(([i, p]) => {
+    const a = AG[i], s0 = spawnB(i), pop = oBack(map(b, s0, s0 + 0.35)); if (pop <= 0) return;
+    const r = [22, 15, 11][a.tier] * p[2] * 2.2 * pop * (1 - cont * 0.6);
+    add(() => glow(p[0], p[1], (a.tier ? 70 : 140) * p[2] * 2.2 * pop, a.col, 0.8 + (b >= 80 ? 0.3 * Math.exp(-fract(b) * 3) : 0)));
+    hex(p[0], p[1], r); ctx.fillStyle = '#081733'; ctx.fill();
+    ctx.strokeStyle = a.col === 'r' ? COL.redHi : a.col === 's' ? COL.silver : COL.blueHi; ctx.lineWidth = 2; ctx.stroke();
+    hex(p[0], p[1], r * 0.45); ctx.fillStyle = a.col === 'r' ? COL.redHi : COL.white; ctx.fill();
+    const u = map(b, s0, s0 + 0.8);
+    if (u > 0 && u < 1) { ctx.globalAlpha = 1 - u; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(p[0], p[1], r + 50 * oExpo(u), 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
+    if (a.name && b < 80) rise(a.name, p[0] + r + 14, p[1] + 6, 16, COL.silver, oExpo(map(b, s0 + 0.3, s0 + 0.8)), { fam: UF, track: 3 }, iExpo(map(b, 79.6, 80)));
+  });
+  add(() => {
+    const o = AP[0];
+    if (o && b >= 80) glow(o[0], o[1], 1600 * Math.exp(-(b - 80) * 3), 'w', 0.55);
+    if (o && cont > 0) { glow(o[0], o[1], 120 + 500 * cont, 'b', cont); glow(o[0], o[1], 60 + 160 * cont, 'w', cont); }
+    if (iris > 0) { glow(960, 540, 4600 * iris, 'w', iris); glow(960, 540, 5200 * iris, 'b', iris); }
+  });
+  // left typography
+  if (b < 80) {
+    const kq = iExpo(map(b, 79.6, 80));
+    if (b < 72) rise('AGENTIC AI  \u00b7  A2A TOPOLOGY', 114, 250, 22, COL.blueHi, oExpo(map(b, 68.4, 69)), { fam: UF, track: 7 }, iExpo(map(b, 71.7, 72)));
+    else rise('AI-POWERED ERP AUTOMATION', 114, 250, 22, COL.blueHi, oExpo(map(b, 72, 72.5)), { fam: UF, track: 7 }, kq);
+    if (b < 72) {
+      const q = iExpo(map(b, 71.6, 72));
+      rise('Agentic AI', 110, 540, 150, COL.white, oExpo(map(b, 68.6, 69.3)), { w: 300 }, q);
+      rise('Autonomous agents collaborating through A2A topologies', 116, 606, 30, COL.silver, oExpo(map(b, 69, 69.6)), { w: 300 }, q);
+      rise('Oracle AI Agent Studio  \u00b7  event-driven orchestration', 116, 654, 22, COL.blueHi, oExpo(map(b, 69.3, 69.9)), { fam: UF, track: 1 }, q);
+    }
+    holo(b, AP[2] ? [AP[2][0], AP[2][1]] : null);
+  } else if (b < 84.4) {
+    const k = clamp(Math.floor(b - 80), 0, 3), u = b - 80 - k, [wd, wt] = WORDS[k], q = k === 3 ? iExpo(map(b, 84, 84.4)) : 0;
+    const X = 110, Y = 600, S = 136;
+    if (k === 0) {
+      const sc = lerp(1.4, 1, oExpo(map(u, 0, 0.35)));
+      ctx.save(); ctx.translate(X, Y - S * 0.35); ctx.scale(sc, sc); text(wd, 0, S * 0.35, S, COL.white, { w: wt, track: 2 }); ctx.restore();
+    } else if (k === 1) {
+      const xs = q2 => lerp(-900, X, oExpo(map(q2, 0, 0.4))), x0 = xs(u), v = x0 - xs(u - 0.06);
+      if (v > 4) for (let g = 3; g >= 1; g--) text(wd, x0 - v * g * 0.8, Y, S, COL.blueHi, { w: wt, track: 2, alpha: 0.16 * (4 - g) / 3 });
+      text(wd, x0, Y, S, COL.white, { w: wt, track: 2 });
+    } else if (k === 2) {
+      setFont(S, wt, DF, 2); let x = X;
+      [...wd].forEach((ch, ci) => { rise(ch, x, Y, S, COL.white, oExpo(map(u, ci * 0.035, ci * 0.035 + 0.4)), { w: wt }); x += tw(ch, S, wt, DF, 2); });
+    } else {
+      const wr = oExpo(map(u, 0, 0.45)), ww = tw(wd, S, wt, DF, 2);
+      ctx.save(); ctx.beginPath(); ctx.rect(X - 10, Y - S, (ww + 20) * wr, S * 1.3); ctx.clip();
+      rise(wd, X, Y, S, COL.white, 1, { w: wt, track: 2 }, q); ctx.restore();
+      if (wr < 1) { ctx.fillStyle = COL.red; ctx.fillRect(X - 10 + (ww + 20) * wr, Y - S * 0.8, 5, S); }
+    }
+    text('REAL-TIME DECISIONING  \u00b7  AUTONOMOUS VALIDATION  \u00b7  AI-POWERED ERP', 114, Y + 56, 20, COL.blueHi, { fam: UF, track: 3, alpha: map(b, 80.2, 80.7) * (1 - q) });
+  }
+}
+
+// =================================================================== S5 CALLOUTS  (b 86-104)
+const NP5 = 1400;
+const R5 = mulberry32(55);
+function fit(a) {
+  const out = a.slice(0, NP5);
+  while (out.length < NP5) { const s = a[Math.floor(R5() * a.length)]; out.push([s[0] + (R5() - .5) * 8, s[1] + (R5() - .5) * 8, s[2] + (R5() - .5) * 8, s[3]]); }
+  for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(R5() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
+  return out;
+}
+function tRings() {
+  const out = [], radii = Array.from({ length: 13 }, (_, j) => 60 + j * 36), sum = radii.reduce((a, c) => a + c, 0);
+  radii.forEach((r, j) => { const n = Math.round(NP5 * r / sum); for (let i = 0; i < n; i++) { const a = i / n * TAU; out.push([Math.cos(a) * r, Math.sin(a) * r, (R5() - .5) * 10, j === 12 ? 'r' : j % 3 === 0 ? 'b' : 'w']); } });
+  return fit(out);
+}
+function tGlobe() {
+  const out = [], R = 470;
+  for (const la of [-60, -40, -20, 0, 20, 40, 60]) { const a = la * Math.PI / 180; for (let i = 0; i < 80; i++) { const t = i / 80 * TAU; out.push([Math.cos(t) * Math.cos(a) * R, Math.sin(a) * R, Math.sin(t) * Math.cos(a) * R, 's']); } }
+  for (let m = 0; m < 12; m++) { const t = m / 12 * Math.PI; for (let i = 0; i < 60; i++) { const a = -Math.PI / 2 + i / 59 * Math.PI; out.push([Math.cos(t) * Math.cos(a) * R, Math.sin(a) * R, Math.sin(t) * Math.cos(a) * R, 's']); } }
+  const grid = out.length;
+  for (let k = 0; k < 7; k++) {
+    const A = norm([R5() - .5, R5() - .5, R5() - .5]), C = norm([R5() - .5, R5() - .5, R5() - .5]);
+    for (let i = 0; i < 26; i++) { const u = i / 25, d = norm(lerp3(A, C, u)), h = R * (1 + 0.22 * Math.sin(Math.PI * u)); out.push([d[0] * h, d[1] * h, d[2] * h, k % 2 ? 'b' : 'r']); }
+  }
+  return fit([...out.slice(0, grid).filter((_, i) => i % 2 === 0), ...out.slice(grid)]);
+}
+const HUBS5 = [[0, 0, 0], ...Array.from({ length: 8 }, (_, k) => [Math.cos(k / 8 * TAU) * 430, Math.sin(k / 8 * TAU) * 430, Math.sin(k * 1.7) * 90])];
+function tAgents() {
+  const out = [];
+  HUBS5.forEach((h, k) => { for (let i = 0; i < 40; i++) { const f = fib(i, 40, k ? 32 : 46); out.push([h[0] + f[0], h[1] + f[1], h[2] + f[2], k ? 'w' : 'r']); } });
+  const E = []; for (let k = 1; k <= 8; k++) { E.push([0, k]); E.push([k, k % 8 + 1]); }
+  E.forEach(([a, c]) => { for (let i = 0; i < 64; i++) { const p = lerp3(HUBS5[a], HUBS5[c], i / 63); out.push([p[0], p[1], p[2], 'b']); } });
+  return fit(out);
+}
+const CLOUDS5 = [[-360, 150, 'r', 'OCI'], [360, 150, 'b', 'AZURE'], [0, -210, 's', 'ORACLE SaaS']];
+function tClouds() {
+  const out = [], CIR = [[-78, -8, 52], [-26, 26, 64], [36, 30, 56], [84, -6, 46]], S = 1.55;
+  CLOUDS5.forEach(([cx, cy, c]) => {
+    CIR.forEach(([x, y, r]) => { for (let i = 0; i < 90; i++) { const a = i / 90 * TAU, px = x + Math.cos(a) * r, py = y + Math.sin(a) * r; if (py < -40) continue; if (CIR.some(([x2, y2, r2]) => (x2 !== x || y2 !== y) && Math.hypot(px - x2, py - y2) < r2 - 1)) continue; out.push([cx + px * S, cy + py * S, 0, c]); } });
+    for (let i = 0; i < 40; i++) out.push([cx + (-128 + i / 39 * 256) * S * 0.86, cy - 40 * S, 0, c]);
+  });
+  for (let i = 0; i < 260; i++) { const a = i / 260 * TAU; out.push([Math.cos(a) * 620, Math.sin(a) * 620, 0, i % 11 === 0 ? 'w' : 's']); }
+  [[0, 1], [1, 2], [2, 0]].forEach(([a, c]) => { for (let i = 0; i < 50; i++) { const u = i / 49; out.push([lerp(CLOUDS5[a][0], CLOUDS5[c][0], u), lerp(CLOUDS5[a][1], CLOUDS5[c][1], u), Math.sin(Math.PI * u) * -80, 'b']); } });
+  return fit(out);
+}
+function tShield() {
+  const out = [], P = [];
+  for (let i = 0; i <= 40; i++) P.push([lerp(-330, 330, i / 40), 330]);
+  for (let i = 1; i <= 20; i++) P.push([330, lerp(330, 40, i / 20)]);
+  for (let i = 1; i <= 40; i++) { const u = i / 40; P.push([(1 - u) * (1 - u) * 330 + 2 * u * (1 - u) * 330, (1 - u) * (1 - u) * 40 + 2 * u * (1 - u) * -260 + u * u * -470]); }
+  const half = P.slice(), full = [...half, ...half.slice(0, -1).reverse().map(([x, y]) => [-x, y])];
+  const samp = (pts, n, sc, c) => { for (let i = 0; i < n; i++) { const q = pts[Math.floor(i / n * pts.length)]; out.push([q[0] * sc, q[1] * sc, 0, c]); } };
+  samp(full, 620, 1, 'b'); samp(full, 420, 0.8, 's');
+  for (let i = 0; i < 160; i++) { const a = i / 160 * TAU; out.push([Math.cos(a) * 62, 90 + Math.sin(a) * 62, 0, 'r']); }
+  [[-30, 40, -48, -110], [-48, -110, 48, -110], [48, -110, 30, 40]].forEach(([x0, y0, x1, y1]) => { for (let i = 0; i < 60; i++) out.push([lerp(x0, x1, i / 59), lerp(y0, y1, i / 59), 0, 'r']); });
+  return fit(out);
+}
+const TREE = (() => {
+  const N = [[0, 400, 0, 0]];
+  [-480, -160, 160, 480].forEach(x => N.push([x, 160, 0, 1]));
+  for (let i = 0; i < 16; i++) N.push([-720 + i * 96, -150, 0, 2]);
+  const E = []; for (let k = 1; k <= 4; k++) { E.push([0, k]); for (let c = 0; c < 4; c++) E.push([k, 5 + (k - 1) * 4 + c]); }
+  return { N, E };
+})();
+function tTree() {
+  const out = [];
+  TREE.N.forEach(([x, y, z, l]) => { const n = [80, 45, 22][l], r = [34, 24, 15][l]; for (let i = 0; i < n; i++) { const f = fib(i, n, r); out.push([x + f[0], y + f[1], z + f[2], ['r', 'b', 'w'][l]]); } });
+  TREE.E.forEach(([a, c]) => { for (let i = 0; i < 39; i++) { const p = lerp3(TREE.N[a], TREE.N[c], i / 38); out.push([p[0], p[1], p[2], 's']); } });
+  return fit(out);
+}
+const TGT = [tRings(), tGlobe(), tAgents(), tClouds(), tShield(), tTree()];
+const CB = [86, 89, 92, 95, 98, 101];
+const CO = [['13+', 'YEARS ENTERPRISE EXPERIENCE'], ['Global', 'DIGITAL TRANSFORMATION LEADERSHIP'], ['Multi-Agent', 'AI ARCHITECTURE PIONEER'],
+  ['Cloud', 'ENTERPRISE CLOUD MODERNIZATION'], ['Zero-Trust', 'INTEGRATION STANDARDS'], ['20+', 'ARCHITECTS AND ENGINEERS MENTORED']];
+function shapeXf(k, b) {
+  const yaw = 0.3 * Math.sin((b - 86) * 0.16) + (k === 1 ? (b - 89) * 0.22 : 0), tilt = k === 0 ? -0.35 : k === 1 ? 0.25 : 0.08;
+  return p => rotX(rotY(p, yaw), tilt);
+}
+function s5(b) {
+  ctx.drawImage(BG, 0, 0);
+  const cam = lookAt([60 * Math.sin(b * 0.1), 30, -1550], [0, 0, 0], 1050, 1240, 540);
+  const k = clamp(Math.floor((b - 86) / 3), 0, 5), xs = shapeXf(k, b), xp = k ? shapeXf(k - 1, b) : null;
+  const blast = 1 + 3.2 * iExpo(map(b, 103.1, 104));
+  add(() => {
+    for (let i = 0; i < NP5; i++) {
+      const d = ((i * 7919) % NP5) / NP5, e = spring(map(b, CB[k] - 0.2 + d * 0.35, CB[k] + 0.9 + d * 0.35), 5.5, 10);
+      const dst = xs(TGT[k][i]), src = k ? xp(TGT[k - 1][i]) : [0, 0, 0];
+      const p = lerp3(src, dst, e).map(x => x * blast), c = e > 0.5 || !k ? TGT[k][i][3] : TGT[k - 1][i][3];
+      const q = P3(cam, p); if (!q) continue;
+      glow(q[0], q[1], 9 * q[2] * 1.6 + (c === 'r' ? 3 : 0), c, 0.85 * (k === 0 ? map(b, 86, 86.4) : 1) * (1 - map(b, 103.4, 104)));
+    }
+    if (k === 5) TREE.N.forEach((n, j) => {
+      const lb = 101.7 + j * 0.06, l = map(b, lb, lb + 0.3); if (l <= 0) return;
+      const q = P3(cam, xs(n)); if (q) glow(q[0], q[1], [130, 90, 60][n[3]] * q[2] * 1.4, ['r', 'b', 'w'][n[3]], l * (1 - map(b, 103.3, 103.8)));
+    });
+  });
+  if (k === 3 && b > 95.5) {
+    const q = iExpo(map(b, 97.6, 98));
+    CLOUDS5.forEach(([x, y, c, lab], j) => { const p = P3(cam, xs([x, y - 120, 0])); if (p) rise(lab, p[0], p[1], 24, c === 'r' ? COL.redHi : c === 'b' ? COL.blueHi : COL.white, oExpo(map(b, 95.6 + j * 0.15, 96.1 + j * 0.15)), { w: 600, track: 4, align: 'center' }, q); });
+    const p = P3(cam, xs([0, -690, 0])); if (p) rise('OIC  \u00b7  CONTROL-M  \u00b7  MFTe  \u00b7  BOOMI', p[0], p[1], 18, COL.silver, oExpo(map(b, 96, 96.6)), { fam: UF, track: 4, align: 'center' }, q);
+  }
+  const bar = oExpo(map(b, CB[k], CB[k] + 0.4)) * (1 - map(b, 103.2, 103.7));
+  ctx.fillStyle = COL.red; ctx.fillRect(84, 640 - 210 * bar, 3, 210 * bar);
+  CO.forEach(([big, small], i) => {
+    const end = i < 5 ? CB[i + 1] : 103.6;
+    if (b < CB[i] || b >= end) return;
+    const q = iExpo(map(b, end - 0.3, end));
+    let s = big;
+    if (i === 0) s = Math.round(13 * oExpo(map(b, 86, 87.2))) + '+';
+    if (i === 5) s = Math.round(20 * oExpo(map(b, 101, 102.2))) + '+';
+    rise(s, 110, 560, 150, COL.white, oExpo(map(b, CB[i], CB[i] + 0.45)), { w: 300 }, q);
+    rise(small, 116, 622, 28, COL.silver, oExpo(map(b, CB[i] + 0.12, CB[i] + 0.6)), { w: 600, track: 6 }, q);
+  });
+}
+
+// =================================================================== S6 FINALE  (b 104-120)
+const R6 = mulberry32(66), TOW = [];
+for (let i = 0; i < 13; i++) for (let j = 0; j < 13; j++) {
+  if (i === 3 || i === 9 || j === 3 || j === 9) continue;
+  const core = i === 6 && j === 6, dc = Math.hypot(i - 6, j - 6);
+  TOW.push({ x: (i - 6) * 230, z: (j - 6) * 230, fw: core ? 170 : 110 + R6() * 60, h: core ? 1700 : 120 + Math.pow(R6(), 2.2) * 820 + Math.max(0, 5 - dc) * 110, c: core ? 'r' : R6() < 0.12 ? 'r' : R6() < 0.55 ? 'b' : 's', core, id: TOW.length });
+}
+const AVE = [[-690, 'x'], [690, 'x'], [-690, 'z'], [690, 'z']];
+const DRONES = Array.from({ length: 40 }, () => [400 + R6() * 1100, 350 + R6() * 600, R6() * TAU, (R6() < 0.5 ? -1 : 1) * (0.1 + R6() * 0.12), R6() < 0.2 ? 'r' : 'w']);
+const CORE_TOP = [0, 1700, 0];
+const TITLES = [[106, 'TECHNICAL FELLOW', 360], [108, 'ENTERPRISE ARCHITECT', 470], [110, 'AI INNOVATOR', 580]];
+function camS6(b) {
+  const E = keyedV(b, [[104, [-1750, 380, -2050]], [112, [1350, 1500, -2100]], [120, [450, 3100, -2700]]]);
+  const T = keyedV(b, [[104, [0, 520, 0]], [112, [0, 700, 0]], [120, [0, 520, 0]]]);
+  return lookAt(E, T, 1100);
+}
+function towerDraw(cam, T, b) {
+  const { x, z, fw, h } = T, hw = fw / 2, E = cam.E;
+  const faces = [
+    [[0, 0, -1], [[x - hw, 0, z - hw], [x + hw, 0, z - hw], [x + hw, h, z - hw], [x - hw, h, z - hw]], '#0b1a38'],
+    [[0, 0, 1], [[x + hw, 0, z + hw], [x - hw, 0, z + hw], [x - hw, h, z + hw], [x + hw, h, z + hw]], '#0b1a38'],
+    [[-1, 0, 0], [[x - hw, 0, z + hw], [x - hw, 0, z - hw], [x - hw, h, z - hw], [x - hw, h, z + hw]], '#08142c'],
+    [[1, 0, 0], [[x + hw, 0, z - hw], [x + hw, 0, z + hw], [x + hw, h, z + hw], [x + hw, h, z - hw]], '#08142c'],
+  ];
+  const ec = T.c === 'r' ? COL.redHi : T.c === 'b' ? COL.blueHi : COL.silver;
+  for (const [n, q, fill] of faces) {
+    const cx = (q[0][0] + q[2][0]) / 2, cz = (q[0][2] + q[2][2]) / 2;
+    if ((E[0] - cx) * n[0] + (E[2] - cz) * n[2] <= 0) continue;
+    const P = q.map(p => P3(cam, p)); if (P.some(p => !p)) continue;
+    ctx.beginPath(); P.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+    if (P[0][3] < 4200) {
+      ctx.strokeStyle = T.c === 'r' ? 'rgba(255,140,110,0.5)' : 'rgba(170,215,255,0.45)'; ctx.lineWidth = 1; ctx.beginPath();
+      for (let y = 60, lv = 0; y < h - 30; y += 62, lv++) {
+        if (rnd(T.id * 97 + lv * 13 + (n[0] + 2) * 5 + (n[2] + 2)) < 0.42) continue;
+        if (rnd(T.id * 31 + lv + Math.floor(b * 1.5) * 7) < 0.08) continue;
+        const a = P3(cam, lerp3([q[0][0], y, q[0][2]], [q[1][0], y, q[1][2]], 0.14)), c = P3(cam, lerp3([q[0][0], y, q[0][2]], [q[1][0], y, q[1][2]], 0.86));
+        if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); }
+      }
+      ctx.stroke();
+    }
+  }
+  const top = [[x - hw, h, z - hw], [x + hw, h, z - hw], [x + hw, h, z + hw], [x - hw, h, z + hw]].map(p => P3(cam, p));
+  if (top.every(Boolean)) {
+    ctx.beginPath(); top.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+    if (E[1] > h) { ctx.fillStyle = '#10264f'; ctx.fill(); }
+    ctx.strokeStyle = ec; ctx.lineWidth = T.core ? 2.5 : 1.4; ctx.globalAlpha = 0.85; ctx.stroke(); ctx.globalAlpha = 1;
+  }
+}
+function s6(b) {
+  ctx.drawImage(BG, 0, 0);
+  const cam = camS6(b), conv = ioCubic(map(b, 111, 112.3)) * (1 - oExpo(map(b, 112.3, 114.2)));
+  const arrive = oExpo(map(b, 104, 104.9));
+  // ground grid + avenues
+  ctx.save(); ctx.globalAlpha = 0.08; ctx.strokeStyle = COL.blueHi; ctx.lineWidth = 1; ctx.beginPath();
+  for (let g = -1610; g <= 1610; g += 230) {
+    let a = P3(cam, [g, 0, -1700]), c = P3(cam, [g, 0, 1700]); if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); }
+    a = P3(cam, [-1700, 0, g]); c = P3(cam, [1700, 0, g]); if (a && c) { ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); }
+  }
+  ctx.stroke(); ctx.restore();
+  add(() => {
+    AVE.forEach(([o, ax], a) => {
+      const A = ax === 'x' ? [o, 4, -1700] : [-1700, 4, o], C = ax === 'x' ? [o, 4, 1700] : [1700, 4, o];
+      const pa = P3(cam, A), pc = P3(cam, C); if (pa && pc) strokePts([pa, pc], COL.blueHi, 2, 0.35 * arrive);
+      for (let k = 0; k < 26; k++) {
+        let p = lerp3(A, C, fract(b * 0.22 * (a % 2 ? -1 : 1) + k / 26 + a * 0.3));
+        p = lerp3(p, CORE_TOP, conv);
+        const q = P3(cam, p); if (q) glow(q[0], q[1], 46 * q[2] * 2, k % 5 ? 'b' : 'r', 0.9 * arrive);
+      }
+    });
+    if (b >= 112) for (let n = 0; n < 3; n++) {
+      const u = fract((b - 112) / 2.4 + n / 3), r = 500 + u * 1700, P = [];
+      for (let k = 0; k <= 96; k++) { const a = k / 96 * TAU, q = P3(cam, [Math.cos(a) * r, 6, Math.sin(a) * r]); if (q) P.push(q); }
+      strokePts(P, n === 1 ? COL.redHi : COL.blueHi, 2, (1 - u) * 0.5 * map(b, 112, 112.5));
+    }
+  });
+  TOW.map(T => [T, P3(cam, [T.x, T.h / 2, T.z])]).filter(x => x[1]).sort((a, c) => c[1][3] - a[1][3]).forEach(([T]) => towerDraw(cam, T, b));
+  add(() => {
+    const ct = P3(cam, CORE_TOP), cb = P3(cam, [0, 5200, 0]);
+    if (ct) {
+      if (cb) { const h = Math.hypot(cb[0] - ct[0], cb[1] - ct[1]); ctx.save(); ctx.translate(ct[0], ct[1]); ctx.rotate(Math.atan2(cb[1] - ct[1], cb[0] - ct[0]) - Math.PI / 2); glowWH(0, h / 2, 60 * ct[2] * 2, h, 'r', 0.5 * arrive); glowWH(0, h / 2, 18 * ct[2] * 2, h, 'w', 0.7 * arrive); ctx.restore(); }
+      glow(ct[0], ct[1], 260 * ct[2] * 2, 'r', 0.9);
+      if (b >= 112) { const f = Math.exp(-(b - 112) * 2.2); glow(ct[0], ct[1], 3400 * f, 'w', f); glow(ct[0], ct[1], 4200 * f, 'b', f * 0.8); }
+    }
+    DRONES.forEach(([r, alt, a0, sp, c]) => {
+      const a = a0 + b * sp; let p = [Math.cos(a) * r, alt + 60 * Math.sin(b * 0.7 + a0), Math.sin(a) * r];
+      p = lerp3(p, CORE_TOP, conv);
+      const q = P3(cam, p); if (q) glow(q[0], q[1], 34 * q[2] * 2, c, 0.95);
+    });
+  });
+  // dim for the final card
+  const dim = ioCubic(map(b, 112.6, 113.8));
+  if (dim > 0) { ctx.fillStyle = `rgba(3,8,20,${0.55 * dim})`; ctx.fillRect(0, 0, W, H); }
+  // titles
+  const clp = iExpo(map(b, 111.8, 112.35));
+  if (b >= 106 && clp < 1) TITLES.forEach(([tb, s, y], i) => {
+    if (b < tb) return;
+    const tr = lerp(42, 16, oExpo(map(b, tb, tb + 1.2))), next = i < 2 ? TITLES[i + 1][0] : 999;
+    const yy = lerp(y, 470, clp);
+    ctx.save(); ctx.translate(0, yy); ctx.scale(1, 1 - clp);
+    rise(s, 960, 0, 84, b >= next ? COL.silver : COL.white, oExpo(map(b, tb, tb + 0.5)), { w: 600, track: tr, align: 'center', alpha: b >= next ? 0.72 : 1 });
+    ctx.restore();
+  });
+  // final lockup
+  if (b >= 112.8) {
+    const wr = oExpo(map(b, 112.8, 114)), tr = lerp(34, 4, oExpo(map(b, 112.8, 115.2)));
+    ctx.save(); ctx.beginPath(); ctx.rect(960 - 1000 * wr, 400, 2000 * wr, 150); ctx.clip();
+    setFont(100, 300, DF, tr); ctx.textAlign = 'center'; ctx.fillStyle = metal(440, 528); ctx.fillText('Shaik Mohammad Musthafa', 960 + tr / 2, 520); ctx.restore();
+    const rw = 440 * oExpo(map(b, 113.4, 114.4)); ctx.fillStyle = COL.red; ctx.fillRect(960 - rw / 2, 562, rw, 3);
+    const words = 'Building the Next Generation of Intelligent Enterprises'.split(' '), sp = tw(' ', 36, 400, DF, 2);
+    const ws = words.map(w => tw(w, 36, 400, DF, 2)), tot = ws.reduce((a, c) => a + c, 0) + sp * (words.length - 1);
+    let x = 960 - tot / 2;
+    words.forEach((w, k) => { rise(w, x, 632, 36, k >= 5 ? COL.white : COL.silver, oExpo(map(b, 114 + k * 0.5, 114.55 + k * 0.5)), { w: 400, track: 2 }); x += ws[k] + sp; });
+  }
+}
+
+// =================================================================== frame
+window.seek = t => {
+  const b = beatAt(t);
+  ctx.reset();
+  if (b < 24) s1(b); else if (b < 48) s2(b); else if (b < 68) s3(b); else if (b < 86) s4(b); else if (b < 104) s5(b); else s6(b);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.setLineDash([]);
+  ctx.drawImage(VIG, 0, 0);
+  grain(t);
+  const black = Math.max(1 - map(b, 0, 0.9), ioCubic(map(b, 118.6, 120)));
+  if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${black})`; ctx.fillRect(0, 0, W, H); }
+};
+window.DURATION = 60;
+
+Promise.all([document.fonts.load(`300 100px ${DF}`), document.fonts.load(`600 100px ${DF}`), document.fonts.load(`400 40px ${UF}`)]).then(() => {
+  window.ready = true;
+  window.seek(9.5);
+  if (!window.RENDER) {
+    const audio = new Audio('score.m4a'), btn = document.getElementById('play');
+    const tick = () => { window.seek(audio.currentTime); if (!audio.paused) requestAnimationFrame(tick); };
+    const start = () => { btn.style.display = 'none'; audio.currentTime = 0; audio.play().then(() => requestAnimationFrame(tick)); };
+    btn.addEventListener('click', start);
+    audio.addEventListener('ended', () => { btn.textContent = 'PLAY AGAIN'; btn.style.display = 'block'; });
+  }
+});
+</script>
+</body>
+</html>

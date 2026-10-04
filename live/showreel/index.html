@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Showreel 2026</title>
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; height: 100%; }
+  canvas { display: block; position: absolute; inset: 0; margin: auto; width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; }
+  #play { position: absolute; left: 50%; bottom: 9vh; transform: translateX(-50%); padding: 14px 34px; border: 1px solid #121212;
+          background: #efe9dd; color: #121212; font: 400 16px Consolas, monospace; letter-spacing: .2em; cursor: pointer; }
+  #play:hover { border-color: #ff3b1d; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<button id="play">PLAY WITH SOUND</button>
+<script>
+const W = 1920, H = 1080;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const PAPER = '#efe9dd', INK = '#121212', ACC = '#ff3b1d';
+const DF = 'Bahnschrift', UF = 'Consolas';
+const BEATS = window.BEATS || { offset: 0.010655, period: 0.500093 };
+const beatAt = t => (t - BEATS.offset) / BEATS.period;
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const RT = (() => { const r = mulberry32(7); return Array.from({ length: 4096 }, () => r()); })();
+const rnd = i => RT[((Math.floor(i) % 4096) + 4096) % 4096];
+
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const map = (x, a, b) => clamp((x - a) / (b - a));
+const lerp = (a, b, x) => a + (b - a) * x;
+const oExpo = x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x);
+const iExpo = x => x <= 0 ? 0 : Math.pow(2, 10 * x - 10);
+const ioCubic = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const oBack = (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+const oElastic = x => x <= 0 ? 0 : x >= 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - 0.75) * (2 * Math.PI / 3)) + 1;
+const spring = (x, k = 6, w = 13) => x <= 0 ? 0 : x >= 1 ? 1 : 1 - Math.exp(-k * x) * Math.cos(w * x);
+
+function font(size, w = 700, fam = DF) {
+  ctx.font = `${w} ${size}px ${fam}`;
+  ctx.fontStretch = fam === DF ? 'semi-condensed' : 'normal';
+  ctx.letterSpacing = fam === DF ? `${(-size * 0.015).toFixed(1)}px` : '0px';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+function bg(c) { ctx.fillStyle = c; ctx.fillRect(-80, -80, W + 160, H + 160); }
+function txt(s, x, y, size, col, w = 700, fam = DF) { font(size, w, fam); ctx.fillStyle = col; ctx.fillText(s, x, y); }
+function letters(s, size) {
+  font(size); ctx.letterSpacing = '0px';
+  let x = 0;
+  return [...s].map(ch => { const w = ctx.measureText(ch).width; const o = { ch, x, w }; x += w - size * 0.015; return o; });
+}
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, Math.max(0.5, w), Math.max(0.5, h), Math.max(0, Math.min(r, w / 2, h / 2))); }
+function typed(s, b, b0, b1) { return s.slice(0, Math.floor(s.length * map(b, b0, b1))); }
+function caret(x, y, size, col, b, busy) {
+  if (busy || Math.floor(b * 4) % 2 === 0) { ctx.fillStyle = col; ctx.fillRect(x + 6, y - size * 0.8, size * 0.55, size * 0.95); }
+}
+
+// ---------------------------------------------------------------- 1 HOOK
+function s1(b) {
+  bg(PAPER);
+  const r = lerp(90, 400, oExpo(map(b, 0, 0.25)));
+  const m = ioCubic(map(b, 0.3, 0.7));
+  const e = oExpo(map(b, 0.7, 1.25));
+  const out = iExpo(map(b, 3.7, 4.0));
+  const w = lerp(2 * r, 1300, m), h = lerp(2 * r, 28, m);
+  let x0 = lerp(960 - w / 2, -60, e), x1 = lerp(960 + w / 2, 1800, e);
+  x0 = lerp(x0, 1800, out);
+  const y = lerp(540, 830, e);
+  const wob = b < 0.5 ? Math.exp(-Math.max(0, b) * 6) * Math.sin(Math.max(0, b) * 36) * (1 - m) : 0;
+  const cw = (x1 - x0) * (1 + 0.16 * wob), ch = h * (1 - 0.16 * wob), cx = (x0 + x1) / 2;
+  ctx.fillStyle = ACC; rr(cx - cw / 2, y - ch / 2, cw, ch, ch / 2); ctx.fill();
+
+  const dy = 760 * iExpo(map(b, 3.72, 4.0));
+  if (b >= 1.2) {
+    const s = typed('> reel.play(2026)', b, 1.2, 2.0);
+    txt(s, 100, 955 + dy, 64, INK, 400, UF);
+    caret(100 + ctx.measureText(s).width, 955 + dy, 64, ACC, b, b < 2.0);
+  }
+  if (b >= 1.05) {
+    const px = q => lerp(2150, 100, oExpo(map(q, 1.05, 1.7)));
+    const xw = px(b), v = px(b - 0.06) - xw;
+    const BY = 806 + dy, word = 'MOTION';
+    font(440);
+    if (v > 3) for (let k = 3; k >= 1; k--) {
+      ctx.save(); ctx.globalAlpha = 0.18 * (4 - k) / 3; ctx.fillStyle = ACC; ctx.fillText(word, xw + v * k * 0.9, BY); ctx.restore();
+    }
+    const d = b >= 3 && b < 3.9 ? Math.exp(-(b - 3) * 4.5) : 0;
+    if (d > 0.01) {
+      for (let k = 0; k < 14; k++) {
+        const y0 = 480 + dy + k * 24;
+        ctx.save(); ctx.beginPath(); ctx.rect(-80, y0, W + 160, 24); ctx.clip();
+        ctx.fillStyle = rnd(k * 7 + 2) > 0.68 ? ACC : INK;
+        ctx.fillText(word, xw + (rnd(k * 7 + 1) - 0.5) * 340 * d, BY);
+        ctx.restore();
+      }
+    } else { ctx.fillStyle = INK; ctx.fillText(word, xw, BY); }
+  }
+}
+
+// ---------------------------------------------------------------- 2 TYPE STACK
+const W2 = ['TYPE', 'SHAPE', 'TIME', 'RHYTHM'];
+const D2 = ['kinetic type', 'shape language', 'timing', 'rhythm'];
+function tc(t) {
+  const f = Math.floor(t * 30), s = Math.floor(f / 30) % 60;
+  return `TC 00:00:${String(s).padStart(2, '0')}:${String(f % 30).padStart(2, '0')}`;
+}
+function s2(b, t) {
+  const i = clamp(Math.floor(b - 4), 0, 3), u = b - 4 - i;
+  const BGc = [INK, PAPER, ACC, INK][i], FG = [PAPER, INK, INK, PAPER][i];
+  bg(BGc);
+  const push = oExpo(map(u, 0, 0.4));
+  const BIG = 380, SMALL = 150, BY = 820, SY = 470, GAP = 150;
+  for (let j = 0; j < i; j++) {
+    const rank = i - j;
+    const size = rank === 1 ? lerp(BIG, SMALL, push) : SMALL;
+    const y = rank === 1 ? lerp(BY, SY, push) : SY - lerp(rank - 2, rank - 1, push) * GAP;
+    font(size); ctx.lineWidth = 3; ctx.strokeStyle = FG; ctx.strokeText(W2[j], 100, y);
+  }
+  const L = letters(W2[i], BIG);
+  font(BIG); ctx.letterSpacing = '0px';
+  const drawLetters = () => L.forEach((o, k) => {
+    let y = BY, sc = 1, rot = 0, col = FG;
+    if (i === 0) y = BY - (1 - oBack(map(u, k * 0.07, k * 0.07 + 0.32), 2.2)) * 900;
+    if (i === 1) { const p = oElastic(map(u, k * 0.05, k * 0.05 + 0.7)); sc = p; rot = (1 - p) * 0.8 * (k % 2 ? 1 : -1); }
+    if (i === 3) {
+      const ph = u * 4 - k * 0.35;
+      y = BY - (ph > 0 ? Math.abs(Math.sin(Math.PI * ph)) : 0) * 110 * (1 - u * 0.5);
+      if (Math.floor(u * 8) % 6 === k) col = ACC;
+    }
+    if (sc <= 0.001) return;
+    ctx.save(); ctx.translate(100 + o.x + o.w / 2, y - BIG * 0.35); ctx.rotate(rot); ctx.scale(sc, sc);
+    ctx.fillStyle = col; ctx.fillText(o.ch, -o.w / 2, BIG * 0.35); ctx.restore();
+  });
+  if (i === 2) {
+    const rx = lerp(60, 1960, oExpo(map(u, 0, 0.55)));
+    ctx.save(); ctx.beginPath(); ctx.rect(-80, -80, rx + 80, H + 160); ctx.clip(); drawLetters(); ctx.restore();
+    if (rx < 1950) {
+      ctx.fillStyle = INK; ctx.fillRect(rx - 5, 300, 10, 560);
+      ctx.beginPath(); ctx.moveTo(rx - 22, 280); ctx.lineTo(rx + 22, 280); ctx.lineTo(rx, 312); ctx.fill();
+    }
+    font(52, 400, UF); ctx.fillStyle = INK; ctx.textAlign = 'right'; ctx.fillText(tc(t), 1820, 950); ctx.textAlign = 'left';
+  } else drawLetters();
+  txt(`0${i + 1} / 04 \u2014 ${D2[i]}`, 104, 955, 62, FG, 400, UF);
+}
+
+// ---------------------------------------------------------------- 3 DEPTH
+const KN = (() => {
+  const P = [], S = [], r = mulberry32(99);
+  for (let s = 0; s < 220; s++) {
+    const ph = s / 220 * Math.PI * 2, rad0 = Math.cos(3 * ph) + 2.2;
+    const cx = rad0 * Math.cos(2 * ph), cy = rad0 * Math.sin(2 * ph), cz = -Math.sin(3 * ph) * 1.2;
+    for (let k = 0; k < 7; k++) {
+      const a = r() * Math.PI * 2, c = r() * 2 - 1, rad = 0.3 * Math.cbrt(r()), sx = Math.sqrt(1 - c * c);
+      P.push([(cx + rad * sx * Math.cos(a)) * 150, (cy + rad * sx * Math.sin(a)) * 150, (cz + rad * c) * 150, s]);
+      S.push([(r() - 0.5) * 5200, (r() - 0.5) * 3200, (r() - 0.5) * 3000]);
+    }
+  }
+  return { P, S };
+})();
+function s3(b) {
+  bg(INK);
+  const ay = (b - 8) * 0.75 + 0.3, ax = 0.55 + 0.2 * Math.sin((b - 8) * 0.9);
+  const cY = Math.cos(ay), sY = Math.sin(ay), cX = Math.cos(ax), sX = Math.sin(ax);
+  const dz = lerp(1600, 1100, ioCubic(map(b, 8, 11.4))), F = 1000;
+  const flat = ioCubic(map(b, 11.2, 11.7));
+  const CX = 1320, CY = 640, band = ((b - 8) * 55) % 220;
+  const pts = [];
+  for (let n = 0; n < KN.P.length; n++) {
+    const [x, y, z, s] = KN.P[n], [X0, Y0, Z0] = KN.S[n];
+    const e = oExpo(map(b, 8 + s / 220 * 0.9, 8 + s / 220 * 0.9 + 0.8));
+    const px = lerp(X0, x, e), py = lerp(Y0, y, e), pz = lerp(Z0, z, e);
+    const x1 = px * cY + pz * sY, z1 = -px * sY + pz * cY;
+    const y1 = (py * cX - z1 * sX) * (1 - flat), z2 = (py * sX + z1 * cX) * (1 - flat * 0.8);
+    const k = F / (z2 + dz);
+    if (k <= 0 || k > 6) continue;
+    const d = ((s - band) % 220 + 220) % 220;
+    pts.push([CX + x1 * k, CY + y1 * k, z2, k, d < 22]);
+  }
+  pts.sort((p, q) => q[2] - p[2]);
+  for (const [X, Y, , k, hl] of pts) {
+    const sz = Math.max(2, 9 * k);
+    ctx.globalAlpha = hl ? 1 : clamp(0.2 + 0.9 * (k - 0.55));
+    ctx.fillStyle = hl ? ACC : PAPER; ctx.fillRect(X - sz / 2, Y - sz / 2, sz, sz);
+  }
+  ctx.globalAlpha = 1;
+  const up = 420 * iExpo(map(b, 11.0, 11.5));
+  ctx.save(); ctx.beginPath(); ctx.rect(-80, -80, W + 160, 425); ctx.clip();
+  letters('DEPTH', 300).forEach((o, k) => {
+    font(300); ctx.letterSpacing = '0px';
+    ctx.fillStyle = PAPER; ctx.fillText(o.ch, 100 + o.x, 330 - up + (1 - oExpo(map(b, 8.1 + k * 0.06, 8.7 + k * 0.06))) * 330);
+  });
+  ctx.restore();
+  if (b > 8.5) {
+    ctx.save(); ctx.globalAlpha = 0.75;
+    txt(typed('1,540 pts \u00b7 z-sorted', b, 8.5, 9.3), 104, 415 - up, 58, PAPER, 400, UF);
+    ctx.restore();
+  }
+}
+function wipe(b) {
+  if (b < 11.5 || b > 12.6) return;
+  const a = oExpo(map(b, 11.5, 11.95)), c = ioCubic(map(b, 12.0, 12.55)), sk = 320;
+  const xR = lerp(-sk, W + sk, a), xL = lerp(-sk, W + sk, c);
+  ctx.fillStyle = ACC; ctx.beginPath();
+  ctx.moveTo(xL, -80); ctx.lineTo(xR, -80); ctx.lineTo(xR - sk, H + 80); ctx.lineTo(xL - sk, H + 80); ctx.fill();
+}
+
+// ---------------------------------------------------------------- 4 DATA
+const barH = n => n === 31 ? 700 : 110 + 540 * Math.pow(n / 31, 1.7) * (0.74 + 0.26 * rnd(n * 13 + 5));
+function s4(b) {
+  bg(PAPER);
+  const X0 = 830, BASE = 900, BW = 24, STEP = 30.5;
+  ctx.fillStyle = INK; ctx.fillRect(X0 - 20, BASE, (STEP * 32 + 20) * oExpo(map(b, 12, 12.6)), 6);
+  for (let k = 0; k < 16; k++) {
+    const p = oBack(map(b, 12 + k * 0.25, 12 + k * 0.25 + 0.3));
+    ctx.fillRect(X0 + k * STEP * 2 + BW / 2 - 2, BASE + 6, 4, 24 * p);
+  }
+  const tops = [];
+  for (let n = 0; n < 32; n++) {
+    const s = Math.floor(n / 8), i = n % 8, b0 = 12 + s + i * 0.06;
+    const h = barH(n) * Math.max(0, oBack(map(b, b0, b0 + 0.45), 2)) * (1 - iExpo(map(b, 15.5 + n * 0.008, 15.85 + n * 0.008)));
+    ctx.fillStyle = n === 31 ? ACC : INK;
+    ctx.fillRect(X0 + n * STEP, BASE - h, BW, h);
+    tops.push([X0 + n * STEP + BW / 2, BASE - h - 26]);
+  }
+  const lp = map(b, 14.95, 15.45);
+  if (lp > 0 && b < 15.5) {
+    ctx.strokeStyle = ACC; ctx.lineWidth = 6; ctx.lineJoin = 'round'; ctx.beginPath();
+    const m = lp * 31;
+    for (let n = 0; n <= Math.floor(m); n++) n === 0 ? ctx.moveTo(...tops[0]) : ctx.lineTo(...tops[n]);
+    if (m < 31) { const a = tops[Math.floor(m)], c = tops[Math.floor(m) + 1], f = m % 1; ctx.lineTo(lerp(a[0], c[0], f), lerp(a[1], c[1], f)); }
+    ctx.stroke();
+  }
+  const out = -1300 * iExpo(map(b, 15.45, 15.95));
+  const v = Math.round(340 * oExpo(map(b, 12.15, 15.2)));
+  txt(`+${v}%`, 90 + out, 430, 300, INK);
+  ctx.fillStyle = ACC; ctx.fillRect(96 + out, 470, 640 * v / 340, 14);
+  txt(typed('32 bars \u00b7 on the grid', b, 12.4, 13.2), 96 + out, 570, 58, INK, 400, UF);
+}
+
+// ---------------------------------------------------------------- 5 INTERFACE
+const CARD = { x: 1000, y: 200, w: 840, h: 660 };
+const knob = k => [CARD.x + CARD.w - 220 + 38, CARD.y + 190 + k * 170];
+function curve(k, x) {
+  if (k === 0) return ioCubic(x);
+  if (k === 1) return spring(x, 5, 16);
+  const n = 7.5625, d = 2.75;
+  if (x < 1 / d) return n * x * x;
+  if (x < 2 / d) return n * (x -= 1.5 / d) * x + 0.75;
+  if (x < 2.5 / d) return n * (x -= 2.25 / d) * x + 0.9375;
+  return n * (x -= 2.625 / d) * x + 0.984375;
+}
+function cursorAt(b) {
+  const pts = [[2050, 1180], knob(0), knob(1), knob(2), [2050, 1180]];
+  const segs = [[16.35, 17, 0], [17.15, 18, 1], [18.15, 19, 2], [19.15, 19.75, 3]];
+  if (b < 16.35) return pts[0];
+  for (const [a, c, k] of segs) {
+    if (b < a) return pts[k];
+    if (b < c) {
+      const u = ioCubic(map(b, a, c)), [x0, y0] = pts[k], [x1, y1] = pts[k + 1];
+      const nx = -(y1 - y0), ny = x1 - x0, l = Math.hypot(nx, ny) || 1, arc = Math.sin(Math.PI * u) * 90;
+      return [lerp(x0, x1, u) + nx / l * arc, lerp(y0, y1, u) + ny / l * arc];
+    }
+  }
+  return pts[4];
+}
+function s5(b) {
+  bg(PAPER);
+  const drop = 900 * iExpo(map(b, 19.4, 19.9));
+  letters('INTERFACE', 160).forEach((o, k) => {
+    font(160); ctx.letterSpacing = '0px'; ctx.fillStyle = INK;
+    const inn = (1 - oExpo(map(b, 16.05 + k * 0.04, 16.6 + k * 0.04))) * -600;
+    ctx.fillText(o.ch, 90 + o.x, 330 + inn + drop * (0.6 + k * 0.08));
+  });
+  txt(typed('real easing', b, 16.4, 16.9), 96, 420 + drop, 58, INK, 400, UF);
+
+  const ent = oBack(map(b, 16, 16.5), 1.4), flip = ioCubic(map(b, 19.45, 19.95));
+  const sx = ent * Math.cos(flip * Math.PI / 2), sy = ent;
+  const ccx = CARD.x + CARD.w / 2, ccy = CARD.y + CARD.h / 2;
+  if (sx > 0.002) {
+    ctx.save(); ctx.translate(ccx, ccy); ctx.scale(sx, sy); ctx.translate(-ccx, -ccy);
+    ctx.fillStyle = INK; rr(CARD.x, CARD.y, CARD.w, CARD.h, 30); ctx.fill();
+    ctx.globalAlpha = 0.45; txt('motion.config', CARD.x + 60, CARD.y + 80, 38, PAPER, 400, UF); ctx.globalAlpha = 1;
+    ctx.fillStyle = '#2b2b2b'; ctx.fillRect(CARD.x, CARD.y + 112, CARD.w, 2);
+    ['ease()', 'spring()', 'bounce()'].forEach((label, k) => {
+      const [kx, ky] = knob(k), on = spring(map(b, 17 + k, 17 + k + 0.7)), tx = kx - 38, tw = 150, th = 76;
+      txt(label, CARD.x + 60, ky + 18, 56, PAPER, 400, UF);
+      const gx = CARD.x + 330, gw = 220, gy = ky + 34, gh = 70, gp = clamp(on);
+      ctx.strokeStyle = '#3a3a3a'; ctx.lineWidth = 2; ctx.strokeRect(gx, gy - gh, gw, gh);
+      if (gp > 0) {
+        ctx.strokeStyle = ACC; ctx.lineWidth = 5; ctx.lineJoin = 'round'; ctx.beginPath();
+        for (let q = 0; q <= 60 * gp; q++) { const x = q / 60, X = gx + x * gw, Y = gy - curve(k, x) * gh; q ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); }
+        ctx.stroke();
+      }
+      ctx.strokeStyle = PAPER; ctx.lineWidth = 4; rr(tx, ky - th / 2, tw, th, th / 2); ctx.stroke();
+      if (on > 0.001) { ctx.fillStyle = ACC; rr(tx, ky - th / 2, lerp(th, tw, clamp(on)), th, th / 2); ctx.fill(); }
+      ctx.fillStyle = PAPER; ctx.beginPath(); ctx.arc(lerp(tx + 38, tx + tw - 38, on), ky, 27, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+  }
+  for (let k = 0; k < 3; k++) {
+    const u = map(b, 17 + k, 17.55 + k);
+    if (u > 0 && u < 1) {
+      const [kx, ky] = knob(k);
+      ctx.strokeStyle = ACC; ctx.lineWidth = 8 * (1 - u);
+      ctx.beginPath(); ctx.arc(kx + 56, ky, 40 + 120 * oExpo(u), 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  const [cx, cy] = cursorAt(b);
+  let press = 1;
+  for (let k = 0; k < 3; k++) { const d = b - (17 + k); if (d > -0.06 && d < 0.14) press = 0.8; }
+  ctx.save(); ctx.translate(cx + 6, cy + 4); ctx.scale(press * 1.5, press * 1.5);
+  ctx.beginPath(); [[0, 0], [0, 58], [15, 45], [26, 70], [37, 65], [26, 41], [44, 41]].forEach(([x, y], q) => q ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  ctx.closePath(); ctx.fillStyle = INK; ctx.fill(); ctx.strokeStyle = PAPER; ctx.lineWidth = 3; ctx.stroke(); ctx.restore();
+}
+
+// ---------------------------------------------------------------- 6 DRAW + MORPH
+function resample(v, n) {
+  const segs = []; let tot = 0;
+  for (let i = 0; i < v.length; i++) { const a = v[i], c = v[(i + 1) % v.length], l = Math.hypot(c[0] - a[0], c[1] - a[1]); segs.push([a, c, l]); tot += l; }
+  const out = []; let si = 0, acc = 0;
+  for (let k = 0; k < n; k++) {
+    const d = k / n * tot;
+    while (acc + segs[si][2] < d) { acc += segs[si][2]; si++; }
+    const [a, c, l] = segs[si], u = (d - acc) / l;
+    out.push([lerp(a[0], c[0], u), lerp(a[1], c[1], u)]);
+  }
+  return out;
+}
+const NP = 180, RS = 230;
+const circ = r => Array.from({ length: NP }, (_, k) => { const a = -Math.PI / 2 + k / NP * Math.PI * 2; return [Math.cos(a) * r, Math.sin(a) * r]; });
+const SHAPES = [
+  circ(RS),
+  resample([[0, -205], [205, -205], [205, 205], [-205, 205], [-205, -205]], NP),
+  resample([[0, -255], [240, 175], [-240, 175]], NP),
+  resample(Array.from({ length: 10 }, (_, k) => { const a = -Math.PI / 2 + k * Math.PI / 5, r = k % 2 ? 118 : 285; return [Math.cos(a) * r, Math.sin(a) * r]; }), NP),
+  circ(50),
+];
+const NAMES = ['DRAW', 'SQUARE', 'TRIANGLE', 'STAR'], SN = ['circle', 'square', 'triangle', 'star'];
+const mix = (A, B, e) => A.map((p, i) => [lerp(p[0], B[i][0], e), lerp(p[1], B[i][1], e)]);
+const SX = 1300, SY = 560;
+function pathPt(s) {
+  if (s < 0.7) { const q = s / 0.7; return [lerp(-40, SX - RS, q), SY + 150 * Math.sin(Math.PI * 3 * q) * (1 - q)]; }
+  const a = Math.PI + (s - 0.7) / 0.3 * Math.PI * 2;
+  return [SX + Math.cos(a) * RS, SY + Math.sin(a) * RS];
+}
+function s6(b) {
+  bg(PAPER);
+  const kk = b < 21 ? -1 : b < 22 ? 0 : b < 23 ? 1 : 2;
+  if (b >= 21) {
+    const T = 21 + kk, e = spring(map(b, T, T + 0.9));
+    let pts = mix(SHAPES[kk], SHAPES[kk + 1], e);
+    const d = ioCubic(map(b, 23.55, 24));
+    pts = mix(pts, SHAPES[4], d);
+    const fs = kk === 0 ? oBack(map(b, 21, 21.35)) : 1;
+    const punch = 1 + 0.12 * Math.exp(-(b - T) * 8);
+    const rot = (1 - clamp(e)) * 0.35 * (kk % 2 ? 1 : -1) * (1 - d);
+    ctx.save(); ctx.translate(lerp(SX, 300, d), lerp(SY, 850, d)); ctx.rotate(rot); ctx.scale(fs * punch, fs * punch);
+    ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+    ctx.fillStyle = d > 0 ? ACC : [INK, ACC, INK][kk]; ctx.fill();
+    if (kk === 2 && d === 0) { ctx.strokeStyle = ACC; ctx.lineWidth = 10; ctx.lineJoin = 'round'; ctx.stroke(); }
+    ctx.restore();
+  }
+  const pd = map(b, 20.25, 21.15), p0 = 0.7 * oExpo(map(b, 21.0, 21.7));
+  if (pd > 0 && b < 21.4) {
+    ctx.strokeStyle = INK; ctx.lineWidth = 14; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+    for (let q = 0; q <= 400; q++) { const s = lerp(p0, pd, q / 400), [x, y] = pathPt(s); q ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+    if (pd < 1) { const [x, y] = pathPt(pd); ctx.fillStyle = ACC; ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI * 2); ctx.fill(); }
+  }
+  const lbl = kk < 0 ? 'draw(path)' : `morph(${SN[kk]} \u2192 ${SN[kk + 1]})`;
+  txt(lbl, 96, 380, 58, INK, 400, UF);
+  const cur = kk + 1, roll = kk < 0 ? 1 : oExpo(map(b, 21 + kk, 21.4 + kk));
+  ctx.save(); ctx.beginPath(); ctx.rect(-80, 440, W + 160, 230); ctx.clip();
+  if (roll < 1 && cur > 0) txt(NAMES[cur - 1], 90, 640 - roll * 230, 210, INK);
+  txt(NAMES[cur], 90, 640 + (1 - roll) * 230, 210, cur === 2 ? ACC : INK);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- 7 PHYSICS
+const FLOOR = 900, BR = 50;
+const BOUNCES = [[24, 25, 460], [25, 26, 360], [26, 26.5, 110], [26.5, 26.75, 28], [26.75, 26.875, 7]];
+function ballAt(b) {
+  let y = FLOOR - BR, st = 0, sq = 0;
+  for (const [a, c, h] of BOUNCES) if (b >= a && b < c) { const u = (b - a) / (c - a); y = FLOOR - BR - h * 4 * u * (1 - u); st = Math.abs(1 - 2 * u) * Math.min(1, h / 500) * 0.38; }
+  for (const [, c, h] of BOUNCES) { const dt = b - c; if (dt >= 0 && dt < 0.15) sq = Math.max(sq, Math.sin(Math.PI * dt / 0.15) * Math.min(1, h / 400) * 0.45); }
+  const x = 300 + 1250 * (1 - Math.pow(1 - map(b, 24, 27), 2));
+  return { x, y, st, sq };
+}
+function s7(b) {
+  bg(INK);
+  ctx.fillStyle = PAPER; ctx.fillRect(100, FLOOR, 1720 * oExpo(map(b, 24, 24.5)), 4);
+  letters('SQUASH & STRETCH', 150).forEach((o, k) => {
+    font(150); ctx.letterSpacing = '0px'; ctx.fillStyle = PAPER;
+    ctx.fillText(o.ch, 90 + o.x, 230 - (1 - oBack(map(b, 24.05 + k * 0.03, 24.45 + k * 0.03), 2)) * 330);
+  });
+  ctx.save(); ctx.globalAlpha = 0.75;
+  txt(typed('spacing chart \u00b7 on 2s', b, 24.4, 25.1), 96, 320, 58, PAPER, 400, UF);
+  ctx.restore();
+  const step = (2 / 30) / BEATS.period;
+  ctx.strokeStyle = PAPER; ctx.lineWidth = 2; ctx.globalAlpha = 0.35;
+  for (let q = 24; q < Math.min(b, 26.6); q += step) { const g = ballAt(q); ctx.beginPath(); ctx.arc(g.x, g.y, BR, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.globalAlpha = 1;
+  const z = iExpo(map(b, 26.6, 27.05)), g = ballAt(b);
+  if (z === 0) {
+    const hgt = map(FLOOR - BR - g.y, 0, 460);
+    ctx.fillStyle = '#2a2a2a'; ctx.beginPath(); ctx.ellipse(g.x, FLOOR + 12, BR * (1.2 - 0.6 * hgt), 10 * (1 - 0.5 * hgt), 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.save(); ctx.fillStyle = ACC;
+  if (z > 0) { ctx.beginPath(); ctx.arc(lerp(g.x, 960, z), lerp(g.y, 540, z), BR * (1 + z * 48), 0, Math.PI * 2); ctx.fill(); }
+  else if (g.sq > 0) { ctx.translate(g.x, FLOOR); ctx.scale(1 + g.sq, 1 - g.sq); ctx.beginPath(); ctx.arc(0, -BR, BR, 0, Math.PI * 2); ctx.fill(); }
+  else { ctx.translate(g.x, g.y); ctx.scale(1 - g.st * 0.5, 1 + g.st); ctx.beginPath(); ctx.arc(0, 0, BR, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- 8 LOCKUP
+function s8(b) {
+  bg(ACC);
+  const s = typed('github copilot', b, 27.2, 27.8);
+  txt(s, 96, 230, 64, INK, 400, UF);
+  caret(96 + ctx.measureText(s).width, 230, 64, INK, b, b < 27.8);
+  if (b < 28) for (let k = 0; k < 8; k++) if (b >= 27 + k / 8) {
+    ctx.fillStyle = INK; ctx.fillRect(96 + k * 44, 560 - k * 34, 26, 120 + k * 34);
+  }
+  if (b >= 28) {
+    txt('MOTION', lerp(-1600, 90, oExpo(map(b, 28, 28.4))), 560, 400, INK);
+    txt('DESIGN', lerp(2100, 90, oExpo(map(b, 28.06, 28.46))), 890, 400, INK);
+    ctx.fillStyle = PAPER; ctx.fillRect(96, 922, 1730 * oExpo(map(b, 28.2, 28.9)), 16);
+    txt(typed('type \u00b7 depth \u00b7 data \u00b7 ui \u00b7 physics \u00b7 sound', b, 28.4, 29.2), 96, 1010, 54, INK, 400, UF);
+  }
+}
+
+// ---------------------------------------------------------------- frame
+const HITS = [[0, 10], [3, 16], [12, 8], [16, 10], [21, 9], [22, 9], [23, 11], [28, 28]];
+function shake(b) {
+  let x = 0, y = 0;
+  for (const [h, a] of HITS) if (b >= h && b < h + 0.6) {
+    const d = a * Math.exp(-(b - h) * 12);
+    x += Math.sin(b * 97 + h * 13) * d; y += Math.cos(b * 131 + h * 7) * d;
+  }
+  return [x, y];
+}
+window.seek = t => {
+  const b = beatAt(t);
+  ctx.reset();
+  const [dx, dy] = shake(b); ctx.translate(dx, dy);
+  if (b < 4) s1(b); else if (b < 8) s2(b, t); else if (b < 12) s3(b);
+  else if (b < 16) s4(b); else if (b < 20) s5(b); else if (b < 24) s6(b);
+  else if (b < 27) s7(b); else s8(b);
+  wipe(b);
+};
+window.DURATION = 15;
+
+Promise.all([document.fonts.load(`700 100px ${DF}`), document.fonts.load(`400 40px ${UF}`)]).then(() => {
+  window.ready = true;
+  window.seek(14.4);
+  if (!window.RENDER) {
+    const audio = new Audio('score.m4a'), btn = document.getElementById('play');
+    const tick = () => { window.seek(audio.currentTime); if (!audio.paused) requestAnimationFrame(tick); };
+    const start = () => { btn.style.display = 'none'; audio.currentTime = 0; audio.play().then(() => requestAnimationFrame(tick)); };
+    btn.addEventListener('click', start);
+    audio.addEventListener('ended', () => { btn.textContent = 'PLAY AGAIN'; btn.style.display = 'block'; });
+  }
+});
+</script>
+</body>
+</html>
